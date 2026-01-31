@@ -1,0 +1,39 @@
+// GIAG RT direct-write: scatter packed bytes into a slot-indexed param buffer.
+// Used for per-node param sparse updates without CopyBufferPass.
+//
+// Contract:
+// - StrideBytes is a multiple of 4.
+// - ValuesBytes is tightly packed: NumWrites * StrideBytes bytes.
+//
+#include "/Engine/Public/Platform.ush"
+#include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
+
+uint NumWrites;
+uint StrideBytes;
+
+StructuredBuffer<uint> OutputIndices; // SlotIndex per write
+ByteAddressBuffer ValuesBytes;        // packed bytes (as dwords)
+RWByteAddressBuffer RW_DstBytes;      // destination param buffer as byte-addressable
+
+[numthreads(64, 1, 1)]
+void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	const uint DispatchId = GroupId.x * 64u + GroupIndex;
+	if (DispatchId >= NumWrites)
+	{
+		return;
+	}
+
+	const uint SlotIndex = OutputIndices[DispatchId];
+
+	const uint SrcBase = DispatchId * StrideBytes;
+	const uint DstBase = SlotIndex * StrideBytes;
+
+	// Copy dwords.
+	for (uint Off = 0; Off < StrideBytes; Off += 4u)
+	{
+		const uint V = ValuesBytes.Load(SrcBase + Off);
+		RW_DstBytes.Store(DstBase + Off, V);
+	}
+}
+

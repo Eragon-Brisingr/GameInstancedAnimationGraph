@@ -1,0 +1,96 @@
+// Additive (Base + Additive scaled by per-slot alpha) -> PoseOut.
+// Pose layout is TRS: one FGIAG_BoneTRS per bone.
+//
+// Semantics match UE's local-space AccumulateAdditivePose:
+// - Translation is additive
+// - Rotation is multiplicative (delta quaternion multiplied onto base)
+// - Scale3D uses additive-scale delta: finalScale *= (1 + deltaScale * alpha)
+
+#include "/Engine/Public/Platform.ush"
+#include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
+
+uint NumBones;
+uint NumInstances;
+uint DispatchGroupCountX;
+uint DispatchGroupCountY;
+uint DispatchGroupOffset;
+
+StructuredBuffer<FGIAG_BoneTRS> BasePose;
+StructuredBuffer<FGIAG_BoneTRS> AdditivePose;
+StructuredBuffer<float> Alpha; // per-slot
+StructuredBuffer<uint> ActiveInstanceIndices; // ActiveIndex -> SlotIndex
+StructuredBuffer<uint> NeedNodeBits;
+uint NeedNodeWordsPerSlot;
+uint NodeIndex;
+RWStructuredBuffer<FGIAG_BoneTRS> RW_OutPose;
+
+[numthreads(THREADS_X, THREADS_Y, THREADS_Z)]
+void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	uint GroupLinear =
+		DispatchGroupOffset +
+		GroupId.x +
+		GroupId.y * DispatchGroupCountX +
+		GroupId.z * (DispatchGroupCountX * DispatchGroupCountY);
+	uint DispatchId = GroupLinear * (THREADS_X * THREADS_Y * THREADS_Z) + GroupIndex;
+	uint Total = NumBones * NumInstances;
+	if (DispatchId >= Total)
+	{
+		return;
+	}
+
+	uint ActiveIndex = DispatchId / NumBones;
+	uint BoneIndex = DispatchId - ActiveIndex * NumBones;
+
+	uint SlotIndex = ActiveInstanceIndices[ActiveIndex];
+	uint Index = SlotIndex * NumBones + BoneIndex;
+
+	if (NeedNodeWordsPerSlot != 0u && !GIAG_IsNodeNeeded(NeedNodeBits, NeedNodeWordsPerSlot, NodeIndex, SlotIndex))
+	{
+		return;
+	}
+
+	float A01 = saturate(Alpha[SlotIndex]);
+	if (A01 <= 0.0f)
+	{
+		RW_OutPose[Index] = BasePose[Index];
+		return;
+	}
+
+	FGIAG_BoneTRS Base = BasePose[Index];
+	FGIAG_BoneTRS Add = AdditivePose[Index];
+
+	// Fast-path: full weight matches AccumulateWithAdditiveScale (Weight==1).
+	if (A01 >= 1.0f)
+	{
+		FGIAG_BoneTRS R;
+		R.Translation = Base.Translation + Add.Translation;
+		R.TranslationPad = 0.0;
+		R.Scale3D = Base.Scale3D * (float3(1.0, 1.0, 1.0) + Add.Scale3D);
+		R.ScalePad = 0.0;
+		R.Rotation = GIAG_NormalizeQuat(GIAG_QuatMultiply(Add.Rotation, Base.Rotation));
+		RW_OutPose[Index] = R;
+		return;
+	}
+
+	// Slow-path: BlendFromIdentityAndAccumulate (Identity -> Additive, shortest-path).
+	float OneMinus = 1.0 - A01;
+	float Bias = (Add.Rotation.w >= 0.0) ? 1.0 : -1.0;
+
+	FQuat BlendedRot = float4(
+		Add.Rotation.x * A01,
+		Add.Rotation.y * A01,
+		Add.Rotation.z * A01,
+		Add.Rotation.w * A01 + Bias * OneMinus);
+	BlendedRot = GIAG_NormalizeQuat(BlendedRot);
+
+	FGIAG_BoneTRS R;
+	R.Translation = Base.Translation + Add.Translation * A01;
+	R.TranslationPad = 0.0;
+	R.Scale3D = Base.Scale3D * (float3(1.0, 1.0, 1.0) + Add.Scale3D * A01);
+	R.ScalePad = 0.0;
+	R.Rotation = GIAG_NormalizeQuat(GIAG_QuatMultiply(BlendedRot, Base.Rotation));
+
+	RW_OutPose[Index] = R;
+}
+

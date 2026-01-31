@@ -1,0 +1,95 @@
+// BlendLayer (PoseA/PoseB + per-bone weights + per-slot alpha) -> PoseOut.
+// Pose layout is TRS: one FGIAG_BoneTRS per bone.
+
+#include "/Engine/Public/Platform.ush"
+#include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
+
+uint NumBones;
+uint NumInstances;
+uint DispatchGroupCountX;
+uint DispatchGroupCountY;
+uint DispatchGroupOffset;
+
+StructuredBuffer<FGIAG_BoneTRS> PoseA;
+StructuredBuffer<FGIAG_BoneTRS> PoseB;
+StructuredBuffer<float> Weights; // per-bone
+StructuredBuffer<float> Alpha;   // per-slot
+StructuredBuffer<uint> ActiveInstanceIndices; // ActiveIndex -> SlotIndex
+StructuredBuffer<uint> NeedNodeBits;
+uint NeedNodeWordsPerSlot;
+uint NodeIndex;
+RWStructuredBuffer<FGIAG_BoneTRS> RW_OutPose;
+
+[numthreads(THREADS_X, THREADS_Y, THREADS_Z)]
+void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	uint GroupLinear =
+		DispatchGroupOffset +
+		GroupId.x +
+		GroupId.y * DispatchGroupCountX +
+		GroupId.z * (DispatchGroupCountX * DispatchGroupCountY);
+	uint DispatchId = GroupLinear * (THREADS_X * THREADS_Y * THREADS_Z) + GroupIndex;
+	uint Total = NumBones * NumInstances;
+	if (DispatchId >= Total)
+	{
+		return;
+	}
+
+	uint ActiveIndex = DispatchId / NumBones;
+	uint BoneIndex = DispatchId - ActiveIndex * NumBones;
+
+	uint SlotIndex = ActiveInstanceIndices[ActiveIndex];
+
+	if (NeedNodeWordsPerSlot != 0u && !GIAG_IsNodeNeeded(NeedNodeBits, NeedNodeWordsPerSlot, NodeIndex, SlotIndex))
+	{
+		return;
+	}
+
+	uint Index = SlotIndex * NumBones + BoneIndex;
+
+	float A01 = saturate(Alpha[SlotIndex]);
+	if (A01 <= 0.0f)
+	{
+		RW_OutPose[Index] = PoseA[Index];
+		return;
+	}
+
+	float BW = saturate(Weights[BoneIndex]);
+	if (BW <= 0.0f)
+	{
+		RW_OutPose[Index] = PoseA[Index];
+		return;
+	}
+
+	float W = BW * A01;
+	if (W <= 0.0f)
+	{
+		RW_OutPose[Index] = PoseA[Index];
+		return;
+	}
+	if (W >= 1.0f)
+	{
+		RW_OutPose[Index] = PoseB[Index];
+		return;
+	}
+
+	// Inline blend2 (no 4-way): match GIAG_AnimCommon.ush rotation nlerp convention.
+	FGIAG_BoneTRS A = PoseA[Index];
+	FGIAG_BoneTRS B = PoseB[Index];
+
+	FGIAG_BoneTRS R;
+	R.Translation = lerp(A.Translation, B.Translation, W);
+	R.TranslationPad = 0.0;
+	R.Scale3D = lerp(A.Scale3D, B.Scale3D, W);
+	R.ScalePad = 0.0;
+
+	FQuat Ref = GIAG_NormalizeQuat(A.Rotation);
+	FQuat QA = GIAG_AlignQuatToRef(Ref, A.Rotation);
+	FQuat QB = GIAG_AlignQuatToRef(Ref, B.Rotation);
+	FQuat Q = QA * (1.0 - W) + QB * W;
+	R.Rotation = GIAG_NormalizeQuat(Q);
+
+	RW_OutPose[Index] = R;
+}
+
+

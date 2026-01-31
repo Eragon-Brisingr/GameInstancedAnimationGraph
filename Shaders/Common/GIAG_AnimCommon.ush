@@ -1,0 +1,264 @@
+// Common shader helpers for GameInstancedAnim (AnimGraph).
+
+#pragma once
+
+#include "GIAG_Math.ush"
+
+//------------------------------------------------------------------------------
+// Shared structs (shader-visible layouts)
+//------------------------------------------------------------------------------
+
+// ClipPlayer clip meta (matches CPU `GIAG::FGIAG_AnimGraphClipMeta`).
+struct FGIAG_ClipMeta
+{
+	int StartTransformIndex;
+	int NumFrames;
+	float SecondsPerFrame;
+	float SequenceLengthSeconds;
+};
+
+// ClipPlayer runtime state for one clip.
+struct FGIAG_ClipState
+{
+	int Clip;
+	float StartTime;
+	float StartSeconds;
+	float PlayRate;
+	uint Loop;
+};
+
+// ClipPlayer runtime state for one slot (up to 4 chained clips with nested-lerp semantics).
+struct FGIAG_SlotState
+{
+	FGIAG_ClipState Clips[4];
+	uint NumClips;
+	float BlendStartTimes[3];
+	float BlendDurations[3];
+};
+
+// NeedNodeBits layout (slot-major):
+// - Bitset per SlotIndex over NodeIndex.
+// - WordsPerSlot = ceil(NumNodes / 32).
+// - WordIndex = NodeIndex >> 5, BitIndex = NodeIndex & 31.
+// - BufferIndex = SlotIndex * WordsPerSlot + WordIndex.
+bool GIAG_IsNodeNeeded(StructuredBuffer<uint> NeedNodeBits, uint WordsPerSlot, uint NodeIndex, uint SlotIndex)
+{
+	// Contract: WordsPerSlot > 0 and NodeIndex within compiled graph range.
+	uint Word = NeedNodeBits[SlotIndex * WordsPerSlot + (NodeIndex >> 5)];
+	return (Word & (1u << (NodeIndex & 31u))) != 0u;
+}
+
+//------------------------------------------------------------------------------
+// Generic Transform helpers
+//------------------------------------------------------------------------------
+FGIAG_BoneTRS GIAG_MultiplyBoneTRS(in FGIAG_BoneTRS A, in FGIAG_BoneTRS B)
+{
+	FGIAG_BoneTRS R;
+	R.Rotation = GIAG_QuatMultiply(B.Rotation, A.Rotation);
+	float3 loc = GIAG_QuatRotateVector(B.Rotation, B.Scale3D * A.Translation) + B.Translation;
+	R.Translation = loc;
+	R.TranslationPad = 0.0;
+	R.Scale3D = A.Scale3D * B.Scale3D;
+	R.ScalePad = 0.0;
+	R.Rotation = GIAG_NormalizeQuat(R.Rotation);
+	return R;
+}
+
+FGIAG_Transform GIAG_MultiplyTransformTRS(in FGIAG_BoneTRS A, in FGIAG_Transform B)
+{
+	FGIAG_Transform R;
+	R.Rotation = GIAG_QuatMultiply(B.Rotation, A.Rotation);
+	float3 loc = GIAG_QuatRotateVector(B.Rotation, B.Scale3D * A.Translation) + B.Translation;
+	R.Translation = loc;
+	R.TranslationPad = 0.0;
+	R.Scale3D = A.Scale3D * B.Scale3D;
+	R.ScalePad = 0.0;
+	R.Rotation = GIAG_NormalizeQuat(R.Rotation);
+	return R;
+}
+
+FGIAG_Transform GIAG_MultiplyTransform(in FGIAG_Transform A, in FGIAG_Transform B)
+{
+	FGIAG_Transform R;
+	R.Rotation = GIAG_QuatMultiply(B.Rotation, A.Rotation);
+	float3 loc = GIAG_QuatRotateVector(B.Rotation, B.Scale3D * A.Translation) + B.Translation;
+	R.Translation = loc;
+	R.TranslationPad = 0.0;
+	R.Scale3D = A.Scale3D * B.Scale3D;
+	R.ScalePad = 0.0;
+	R.Rotation = GIAG_NormalizeQuat(R.Rotation);
+	return R;
+}
+
+float3x3 GIAG_RotationMatrixFromQuat(in FQuat q)
+{
+	q = GIAG_NormalizeQuat(q);
+	float x = q.x, y = q.y, z = q.z, w = q.w;
+	float xx = x * x, yy = y * y, zz = z * z;
+	float xy = x * y, xz = x * z, yz = y * z;
+	float wx = w * x, wy = w * y, wz = w * z;
+
+	float3 r0 = float3(1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy));
+	float3 r1 = float3(2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx));
+	float3 r2 = float3(2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy));
+	return float3x3(r0, r1, r2); // row-major
+}
+
+float3x4 GIAG_MatrixFromBoneTRS(in FGIAG_BoneTRS T)
+{
+	float3x3 R = GIAG_RotationMatrixFromQuat(T.Rotation);
+
+	// Apply non-uniform scale to the basis rows.
+	R[0] *= T.Scale3D.xxx;
+	R[1] *= T.Scale3D.yyy;
+	R[2] *= T.Scale3D.zzz;
+
+	float3x4 M;
+	M[0] = float4(R[0], T.Translation.x);
+	M[1] = float4(R[1], T.Translation.y);
+	M[2] = float4(R[2], T.Translation.z);
+	return M;
+}
+
+//------------------------------------------------------------------------------
+// Skinning TransformBuffer helpers (SM5/FXC fallback)
+//
+// UE5.7 SkinningDataDecode.ush defines Load/StoreCompressedBoneTransform only
+// under COMPILER_SUPPORTS_HLSL2021. Cook on PCD3D_SM5 may use FXC where this is
+// false, so we provide a fallback implementation here.
+//------------------------------------------------------------------------------
+#include "/Engine/Private/Skinning/SkinningDataDecode.ush"
+
+#if !COMPILER_SUPPORTS_HLSL2021
+#include "/Engine/Shared/SkinningDefinitions.h"
+
+#if USE_COMPRESSED_BONE_TRANSFORM
+float4x3 GIAG_UnpackCompressedBoneTransform(uint4 Data0, uint4 Data1)
+{
+	float4x3 Result;
+	Result[0] = float3(f16tof32(Data0.w), f16tof32(Data0.w >> 16), f16tof32(Data1.x));
+	Result[1] = float3(f16tof32(Data1.x >> 16), f16tof32(Data1.y), f16tof32(Data1.y >> 16));
+	Result[2] = float3(f16tof32(Data1.z), f16tof32(Data1.z >> 16), f16tof32(Data1.w));
+	Result[3] = asfloat(Data0.xyz);
+	return Result;
+}
+
+float4x3 LoadCompressedBoneTransform(ByteAddressBuffer SrcBuffer, uint BaseOffset, uint BoneIndex)
+{
+	const uint Offset = BaseOffset + BoneIndex * 32u;
+	const uint4 Data0 = SrcBuffer.Load4(Offset);
+	const uint4 Data1 = SrcBuffer.Load4(Offset + 16u);
+	return GIAG_UnpackCompressedBoneTransform(Data0, Data1);
+}
+
+float4x3 LoadCompressedBoneTransform(RWByteAddressBuffer SrcBuffer, uint BaseOffset, uint BoneIndex)
+{
+	const uint Offset = BaseOffset + BoneIndex * 32u;
+	const uint4 Data0 = SrcBuffer.Load4(Offset);
+	const uint4 Data1 = SrcBuffer.Load4(Offset + 16u);
+	return GIAG_UnpackCompressedBoneTransform(Data0, Data1);
+}
+
+void StoreCompressedBoneTransform(RWByteAddressBuffer DstBuffer, uint BaseOffset, uint BoneIndex, float4x3 BoneTransform)
+{
+	const uint Offset = BaseOffset + BoneIndex * 32u;
+
+	const uint3 XAxis = f32tof16(BoneTransform[0]);
+	const uint3 YAxis = f32tof16(BoneTransform[1]);
+	const uint3 ZAxis = f32tof16(BoneTransform[2]);
+
+	const uint4 Data0 = uint4(asuint(BoneTransform[3]), XAxis.x | (XAxis.y << 16));
+	const uint4 Data1 = uint4(XAxis.z | (YAxis.x << 16), YAxis.y | (YAxis.z << 16), ZAxis.x | (ZAxis.y << 16), ZAxis.z);
+
+	DstBuffer.Store4(Offset, Data0);
+	DstBuffer.Store4(Offset + 16u, Data1);
+}
+
+#else // !USE_COMPRESSED_BONE_TRANSFORM
+
+float4x3 LoadCompressedBoneTransform(ByteAddressBuffer SrcBuffer, uint BaseOffset, uint BoneIndex)
+{
+	const uint Address = BaseOffset + BoneIndex * 48u;
+	const uint4 Row0 = SrcBuffer.Load4(Address + 0u);
+	const uint4 Row1 = SrcBuffer.Load4(Address + 16u);
+	const uint4 Row2 = SrcBuffer.Load4(Address + 32u);
+	const float3x4 Tmp = float3x4(asfloat(Row0), asfloat(Row1), asfloat(Row2));
+	return transpose(Tmp);
+}
+
+float4x3 LoadCompressedBoneTransform(RWByteAddressBuffer SrcBuffer, uint BaseOffset, uint BoneIndex)
+{
+	const uint Address = BaseOffset + BoneIndex * 48u;
+	const uint4 Row0 = SrcBuffer.Load4(Address + 0u);
+	const uint4 Row1 = SrcBuffer.Load4(Address + 16u);
+	const uint4 Row2 = SrcBuffer.Load4(Address + 32u);
+	const float3x4 Tmp = float3x4(asfloat(Row0), asfloat(Row1), asfloat(Row2));
+	return transpose(Tmp);
+}
+
+void StoreCompressedBoneTransform(RWByteAddressBuffer DstBuffer, uint BaseOffset, uint BoneIndex, float4x3 BoneTransform)
+{
+	const uint Address = BaseOffset + BoneIndex * 48u;
+	const float3x4 Tmp = transpose(BoneTransform);
+	DstBuffer.Store4(Address + 0u, asuint(Tmp[0]));
+	DstBuffer.Store4(Address + 16u, asuint(Tmp[1]));
+	DstBuffer.Store4(Address + 32u, asuint(Tmp[2]));
+}
+
+#endif // USE_COMPRESSED_BONE_TRANSFORM
+#endif // !COMPILER_SUPPORTS_HLSL2021
+
+//------------------------------------------------------------------------------
+// ClipPlayer helpers
+//
+// These helpers are written to be explicit: no implicit references to global
+// resources/parameters. Callers must pass buffers/scalars in.
+//------------------------------------------------------------------------------
+FGIAG_ClipMeta GIAG_ReadClipMeta(StructuredBuffer<FGIAG_ClipMeta> InClipMetas, in uint ClipIndex)
+{
+	return InClipMetas[ClipIndex];
+}
+
+uint GIAG_CalcFrameIndex(in FGIAG_ClipMeta Meta, in float PlaybackTimeSeconds, in uint bLoop)
+{
+	float NumFramesF = max(1.0, (float)Meta.NumFrames);
+	float SecondsPerFrame = max(1e-6, Meta.SecondsPerFrame);
+	float Len = max(1e-6, Meta.SequenceLengthSeconds);
+
+	float T = PlaybackTimeSeconds;
+	if (bLoop != 0)
+	{
+		T = fmod(T, Len);
+		if (T < 0) { T += Len; }
+	}
+	else
+	{
+		T = clamp(T, 0.0, Len);
+	}
+
+	float FrameF = floor(T / SecondsPerFrame);
+	float FrameClamped = clamp(FrameF, 0.0, NumFramesF - 1.0);
+	return (uint)FrameClamped;
+}
+
+float GIAG_CalcBlendAlpha(in float CurrentTimeSeconds, in float BlendStartTime, in float BlendDuration)
+{
+	if (BlendDuration <= 1e-6)
+	{
+		return 1.0;
+	}
+	return saturate((CurrentTimeSeconds - BlendStartTime) / BlendDuration);
+}
+
+uint GIAG_CalcPoseBase(
+	StructuredBuffer<FGIAG_ClipMeta> InClipMetas,
+	in uint NumBones,
+	in float CurrentTimeSeconds,
+	in FGIAG_ClipState CS)
+{
+	uint ClipIndex = (uint)max(0, CS.Clip);
+	FGIAG_ClipMeta Meta = GIAG_ReadClipMeta(InClipMetas, ClipIndex);
+	float Playback = (CurrentTimeSeconds - CS.StartTime) * CS.PlayRate + CS.StartSeconds;
+	uint Frame = GIAG_CalcFrameIndex(Meta, Playback, CS.Loop);
+	return (uint)Meta.StartTransformIndex + Frame * NumBones;
+}

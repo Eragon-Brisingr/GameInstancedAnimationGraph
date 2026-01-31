@@ -1,0 +1,73 @@
+// GIAG Niagara attach: compute per-attachment world Transform from FinalLocalPose + SocketLocalTRS.
+// Output layout for Niagara Mesh script: 3x float4 per instance:
+//   [Index*3+0] = Rotation(x,y,z,w)
+//   [Index*3+1] = Translation(x,y,z,0)
+//   [Index*3+2] = Scale(x,y,z,0)
+
+#include "/Engine/Public/Platform.ush"
+#include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
+
+uint NumBones;
+uint NumAttachments;
+
+StructuredBuffer<int> ParentIndices;
+StructuredBuffer<FGIAG_BoneTRS> LocalPoseTRS; // slot-indexed, one per bone
+StructuredBuffer<FGIAG_Transform> ComponentToWorldBySlot; // slot-indexed
+
+struct FGIAG_AttachDescPacked
+{
+	uint SlotIndex;
+	uint BoneIndex;
+	uint OutputIndex;
+	uint Flags;
+	FGIAG_BoneTRS SocketLocalTRS; // bone-local socket transform
+};
+
+StructuredBuffer<FGIAG_AttachDescPacked> AttachDescs;
+RWStructuredBuffer<FGIAG_Transform> RW_FxTransform;
+
+FGIAG_BoneTRS ReadLocalPoseTRS(in uint SlotIndex, in uint BoneIndex)
+{
+	return LocalPoseTRS[SlotIndex * NumBones + BoneIndex];
+}
+
+[numthreads(THREADS_X, 1, 1)]
+void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	const uint DispatchId = GroupId.x * THREADS_X + GroupIndex;
+	if (DispatchId >= NumAttachments)
+	{
+		return;
+	}
+
+	const FGIAG_AttachDescPacked D = AttachDescs[DispatchId];
+
+	// If CPU mode/proxy wants to own/hide this output, skip GPU writes so we don't overwrite
+	// the RT direct-write path (WriteOutTransform / Hide) coming from GT via AttachBus.
+	const uint GIAG_AttachFlag_SkipGpuWrite = 1u;
+	if ((D.Flags & GIAG_AttachFlag_SkipGpuWrite) != 0u)
+	{
+		return;
+	}
+
+	// Bone global (component space) from local pose chain.
+	FGIAG_BoneTRS GlobalT = ReadLocalPoseTRS(D.SlotIndex, D.BoneIndex);
+	int Parent = ParentIndices[D.BoneIndex];
+	int Guard = (int)NumBones + 1;
+	while (Parent >= 0 && Guard-- > 0)
+	{
+		FGIAG_BoneTRS ParentLocal = ReadLocalPoseTRS(D.SlotIndex, (uint)Parent);
+		GlobalT = GIAG_MultiplyBoneTRS(GlobalT, ParentLocal);
+		Parent = ParentIndices[Parent];
+	}
+
+	// Socket in component space: BoneGlobal ∘ SocketLocal.
+	FGIAG_BoneTRS SocketCS = GIAG_MultiplyBoneTRS(D.SocketLocalTRS, GlobalT);
+
+	// World: ComponentToWorld ∘ SocketCS.
+	FGIAG_Transform C2W = ComponentToWorldBySlot[D.SlotIndex];
+	FGIAG_Transform SocketWS = GIAG_MultiplyTransformTRS(SocketCS, C2W);
+
+	RW_FxTransform[D.OutputIndex] = SocketWS;
+}
+

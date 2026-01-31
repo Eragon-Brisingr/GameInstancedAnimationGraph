@@ -1,0 +1,115 @@
+// LocalPose(TRS) -> UE SkinningSceneExtension TransformBuffer (RWByteAddressBuffer).
+// Same math as GIAG_PoseToSkin_CS.usf: Local(TRS)->Global(TRS) chain, then *InvRef(TRS), then TRS->matrix for skinning buffer.
+
+#include "/Engine/Public/Platform.ush"
+#include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
+
+uint NumBones;
+uint NumInstances;
+uint TransformOffset; // base TransformBufferOffset (BYTES) into BoneTransforms (see SkinningSceneExtension provider indirections)
+uint DispatchGroupCountX;
+uint DispatchGroupCountY;
+uint DispatchGroupOffset;
+
+StructuredBuffer<int> ParentIndices;
+StructuredBuffer<FGIAG_BoneTRS> InverseRefPoseTRS; // one per bone
+StructuredBuffer<FGIAG_BoneTRS> LocalPoseTRS;      // slot-indexed, one per bone
+StructuredBuffer<uint> ActiveInstanceIndices; // ActiveIndex -> SlotIndex
+
+// Optional per-slot init flag: if non-zero, set previous=current for this frame (avoid first-frame velocity spikes).
+StructuredBuffer<uint> InitPrevBySlot;
+uint UseInitPrevBySlot;
+
+// If non-zero, force previous=current for all slots this frame (e.g. prev-cache newly created/resized).
+uint ForceInitPrevAllSlots;
+
+// Source reads (same underlying buffer as RW_TransformBuffer).
+ByteAddressBuffer TransformBuffer;
+RWByteAddressBuffer RW_TransformBuffer;
+
+// RT-only GIAG prev-cache: 3 float4 rows per (SlotIndex,BoneIndex) storing float3x4 current matrix.
+Buffer<float4> PrevCacheFloat4;
+RWBuffer<float4> RW_PrevCacheFloat4;
+
+FGIAG_BoneTRS ReadLocalPoseTRS(in uint SlotIndex, in uint BoneIndex)
+{
+	return LocalPoseTRS[SlotIndex * NumBones + BoneIndex];
+}
+
+FGIAG_BoneTRS ReadInvRefPoseTRS(in uint BoneIndex)
+{
+	return InverseRefPoseTRS[BoneIndex];
+}
+
+[numthreads(THREADS_X, THREADS_Y, THREADS_Z)]
+void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	uint LocalGroupLinear = GroupId.x + GroupId.y * DispatchGroupCountX + GroupId.z * DispatchGroupCountX * DispatchGroupCountY;
+	uint GroupLinear = DispatchGroupOffset + LocalGroupLinear;
+	uint DispatchId = GroupLinear * (THREADS_X * THREADS_Y * THREADS_Z) + GroupIndex;
+	uint Total = NumBones * NumInstances;
+	if (DispatchId >= Total)
+	{
+		return;
+	}
+
+	uint ActiveIndex = DispatchId / NumBones;
+	uint BoneIndex = DispatchId - ActiveIndex * NumBones;
+
+	uint SlotIndex = ActiveInstanceIndices[ActiveIndex];
+
+	FGIAG_BoneTRS GlobalT = ReadLocalPoseTRS(SlotIndex, BoneIndex);
+	int Parent = ParentIndices[BoneIndex];
+	int Guard = (int)NumBones + 1;
+	while (Parent >= 0 && Guard-- > 0)
+	{
+		FGIAG_BoneTRS ParentLocal = ReadLocalPoseTRS(SlotIndex, (uint)Parent);
+		GlobalT = GIAG_MultiplyBoneTRS(GlobalT, ParentLocal);
+		Parent = ParentIndices[Parent];
+	}
+
+	FGIAG_BoneTRS InvRef = ReadInvRefPoseTRS(BoneIndex);
+	FGIAG_BoneTRS SkinT = GIAG_MultiplyBoneTRS(InvRef, GlobalT); // Global ∘ InvRef
+	float3x4 SkinM = GIAG_MatrixFromBoneTRS(SkinT);
+
+	// TransformBuffer stores one transform per bone; 'SlotIndex' maps to SkinningDataOffset=SlotIndex*2 (current/previous).
+	// Provider indirections give TransformOffset in BYTES, while StoreCompressedBoneTransform takes a byte base + element index.
+	const uint Base = (SlotIndex * 2u) * NumBones + BoneIndex;
+	const float4x3 BoneXform = transpose(SkinM);
+
+	// Shift previous: previous <- old current, then current <- new.
+	const uint CurIndex = Base + 0u * NumBones;
+	const uint PrevIndex = Base + 1u * NumBones;
+
+	const bool bInitPrev =
+		(ForceInitPrevAllSlots != 0u) ||
+		((UseInitPrevBySlot != 0u) && (InitPrevBySlot[SlotIndex] != 0u));
+
+	float4x3 PrevXf;
+	if (bInitPrev)
+	{
+		PrevXf = BoneXform;
+	}
+	else
+	{
+		// Read previous-current from GIAG prev-cache (float3x4 stored as 3 float4 rows).
+		const uint CacheBase = (SlotIndex * NumBones + BoneIndex) * 3u;
+		const float4 R0 = PrevCacheFloat4[CacheBase + 0u];
+		const float4 R1 = PrevCacheFloat4[CacheBase + 1u];
+		const float4 R2 = PrevCacheFloat4[CacheBase + 2u];
+		const float3x4 PrevSkinM = float3x4(R0, R1, R2);
+		PrevXf = transpose(PrevSkinM);
+	}
+
+	StoreCompressedBoneTransform(RW_TransformBuffer, TransformOffset, PrevIndex, PrevXf);
+	StoreCompressedBoneTransform(RW_TransformBuffer, TransformOffset, CurIndex, BoneXform);
+
+	// Update prev-cache with this frame's current (store SkinM rows).
+	{
+		const uint CacheBase = (SlotIndex * NumBones + BoneIndex) * 3u;
+		RW_PrevCacheFloat4[CacheBase + 0u] = SkinM[0];
+		RW_PrevCacheFloat4[CacheBase + 1u] = SkinM[1];
+		RW_PrevCacheFloat4[CacheBase + 2u] = SkinM[2];
+	}
+}
+

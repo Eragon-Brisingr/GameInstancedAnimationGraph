@@ -1,0 +1,12 @@
+// GIAG ISPC math/types (CPU kernels) - intended to be isomorphic to GIAG_AnimCommon.ush
+// NOTE: Keep these structs POD and layout-stable.
+
+#ifndef GIAG_ANIMCOMMON_ISPH
+#define GIAG_ANIMCOMMON_ISPH
+
+#define GIAG_IGNORE_PERF_WARNING #pragma ignore warning(perf)
+
+#include "GIAG_Math.isph"
+
+#endif // GIAG_ANIMCOMMON_ISPH
+

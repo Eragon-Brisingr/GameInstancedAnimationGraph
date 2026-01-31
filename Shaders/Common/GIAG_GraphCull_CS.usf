@@ -1,0 +1,87 @@
+// AnimGraph culling prepass: build per-slot node-needed bitset.
+//
+// This shader uses Niagara-style runtime HLSL generation:
+// - The per-graph propagation code is injected via IncludeVirtualPathToContentsMap
+//   at compile time (one global-shader permutation per graph).
+// - Resource declarations are fully expanded (no runtime-indexed SRV arrays in HLSL).
+
+// Intentionally keep this shader "standalone" (no /Engine/Public/Platform.ush),
+// to avoid pulling in engine uniform-buffer generated includes. This shader only
+// needs basic HLSL types and numthreads.
+
+#ifndef THREADS_X
+	#define THREADS_X 64
+#endif
+
+#define GIAG_MAX_GRAPH_NODES 256
+
+uint NumNodes;
+uint NumInstances;
+uint SlotCapacity;
+uint WordsPerSlot;
+uint FinalNodeIndex; // 0xFFFFFFFF = none
+
+// Fixed register assignments (so generated per-graph SRVs can use deterministic slots without relying on ParameterMap).
+StructuredBuffer<uint> ActiveInstanceIndices : register(t0); // ActiveIndex -> SlotIndex
+
+// NOTE: Per-node cull parameter buffers are declared in the generated include as:
+//   StructuredBuffer<ElemType> <NodeMember>_<ParamMember>_Params;
+
+RWStructuredBuffer<uint> RW_NeedNodeBits : register(u0);
+
+static uint GIAG_WordIndex(uint NodeIndex) { return (NodeIndex >> 5); }
+static uint GIAG_BitMask(uint NodeIndex) { return (1u << (NodeIndex & 31u)); }
+static uint GIAG_AllInputsMask(uint NumInputs) { return (NumInputs >= 32u) ? 0xFFFFFFFFu : ((NumInputs == 0u) ? 0u : ((1u << NumInputs) - 1u)); }
+
+// Per-graph generated code (injected via virtual include).
+// Must provide:
+// - void GIAG_GraphCull_Propagate(uint SlotIndex, inout uint WordsLocal[GIAG_MAX_GRAPH_NODES/32]);
+#include "/GameInstancedAnimationGraphShader/Generated/GIAG_GraphCull_GeneratedShared.ush"
+
+#ifndef GIAG_GRAPH_CULL_GENERATED
+	#error GIAG GraphCull: generated include injection failed
+#endif
+
+[numthreads(THREADS_X, 1, 1)]
+void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	uint ActiveIndex = GroupId.x * THREADS_X + GroupIndex;
+	if (ActiveIndex >= NumInstances)
+	{
+		return;
+	}
+
+	uint SlotIndex = ActiveInstanceIndices[ActiveIndex];
+	if (SlotIndex >= SlotCapacity)
+	{
+		return;
+	}
+
+	uint WordsLocal[GIAG_MAX_GRAPH_NODES / 32];
+	[unroll]
+	for (uint w = 0; w < (GIAG_MAX_GRAPH_NODES / 32); ++w)
+	{
+		WordsLocal[w] = 0u;
+	}
+
+	if (FinalNodeIndex != 0xFFFFFFFFu && FinalNodeIndex < NumNodes)
+	{
+		WordsLocal[GIAG_WordIndex(FinalNodeIndex)] |= GIAG_BitMask(FinalNodeIndex);
+		GIAG_GraphCull_Propagate(SlotIndex, WordsLocal);
+	}
+	else
+	{
+		// No final node => treat all nodes as needed (keep behavior consistent).
+		for (uint w = 0; w < WordsPerSlot; ++w)
+		{
+			WordsLocal[w] = 0xFFFFFFFFu;
+		}
+	}
+
+	const uint Base = SlotIndex * WordsPerSlot;
+	for (uint w = 0; w < WordsPerSlot; ++w)
+	{
+		RW_NeedNodeBits[Base + w] = WordsLocal[w];
+	}
+}
+

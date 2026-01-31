@@ -1,0 +1,45 @@
+// RefPose -> LocalPose compute shader.
+// Output: LocalPoseTRS (FGIAG_BoneTRS), 1 element per bone (slot-indexed).
+
+#include "/Engine/Public/Platform.ush"
+#include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
+
+uint NumBones;
+uint NumInstances;
+uint DispatchGroupCountX;
+uint DispatchGroupCountY;
+uint DispatchGroupOffset;
+
+StructuredBuffer<uint> ActiveInstanceIndices; // ActiveIndex -> SlotIndex
+StructuredBuffer<FGIAG_BoneTRS> RefPoseLocalTRS; // one per bone
+StructuredBuffer<uint> NeedNodeBits;
+uint NeedNodeWordsPerSlot;
+uint NodeIndex;
+RWStructuredBuffer<FGIAG_BoneTRS> RW_OutPose;
+
+[numthreads(THREADS_X, THREADS_Y, THREADS_Z)]
+void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	uint GroupLinear =
+		DispatchGroupOffset +
+		GroupId.x +
+		GroupId.y * DispatchGroupCountX +
+		GroupId.z * (DispatchGroupCountX * DispatchGroupCountY);
+	uint DispatchId = GroupLinear * (THREADS_X * THREADS_Y * THREADS_Z) + GroupIndex;
+	uint Total = NumBones * NumInstances;
+	if (DispatchId >= Total)
+	{
+		return;
+	}
+
+	uint ActiveIndex = DispatchId / NumBones;
+	uint BoneIndex = DispatchId - ActiveIndex * NumBones;
+
+	uint SlotIndex = ActiveInstanceIndices[ActiveIndex];
+	if (NeedNodeWordsPerSlot != 0u && !GIAG_IsNodeNeeded(NeedNodeBits, NeedNodeWordsPerSlot, NodeIndex, SlotIndex))
+	{
+		return;
+	}
+	RW_OutPose[SlotIndex * NumBones + BoneIndex] = RefPoseLocalTRS[BoneIndex];
+}
+

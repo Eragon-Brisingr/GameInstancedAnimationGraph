@@ -1,0 +1,110 @@
+// GIAG Math single-source implementation shared by ISPC (CPU) and HLSL (GPU).
+// This file is included by:
+// - GIAG_Math.isph (ISPC wrapper)
+// - GIAG_Math.ush  (HLSL wrapper)
+//
+// Contract: wrappers must define the following before including:
+// - Types: FQuat, float3, float4
+// - Macros:
+//   GIAG_INLINE
+//   GIAG_FLOAT3(x,y,z)
+//   GIAG_FLOAT4(x,y,z,w)
+//   GIAG_GET3(v,i)
+//   GIAG_GET4(v,i)
+//
+// Note: We assume inputs are valid (e.g. non-zero quaternion length), per project constraint.
+
+#ifndef GIAG_MATH_SHARED_USH
+#define GIAG_MATH_SHARED_USH
+
+#ifndef GIAG_INLINE
+#define GIAG_INLINE inline
+#endif
+
+//------------------------------------------------------------------------------
+// Shared POD layouts (must match C++/HLSL StructuredBuffer layout)
+//------------------------------------------------------------------------------
+
+// Layout matches C++ `FGIAG_BoneTRS`.
+struct FGIAG_BoneTRS
+{
+	FQuat Rotation;          // quat (x,y,z,w)
+	float3 Translation;      // xyz
+	float TranslationPad;    // align to 16
+	float3 Scale3D;          // xyz
+	float ScalePad;          // align to 16
+};
+
+// Layout matches C++ `FGIAG_Transform`.
+struct FGIAG_Transform
+{
+	FQuat Rotation;          // quat (x,y,z,w)
+	float3 Translation;      // xyz
+	float TranslationPad;    // align to 16
+	float3 Scale3D;          // xyz
+	float ScalePad;          // align to 16
+};
+
+//------------------------------------------------------------------------------
+// TRS helpers
+//------------------------------------------------------------------------------
+
+GIAG_INLINE FGIAG_BoneTRS GIAG_MakeIdentityTRS()
+{
+	FGIAG_BoneTRS T;
+	T.Rotation = GIAG_FLOAT4(0.0f, 0.0f, 0.0f, 1.0f);
+	T.Translation = GIAG_FLOAT3(0.0f, 0.0f, 0.0f);
+	T.TranslationPad = 0.0;
+	T.Scale3D = GIAG_FLOAT3(1.0f, 1.0f, 1.0f);
+	T.ScalePad = 0.0;
+	return T;
+}
+
+//------------------------------------------------------------------------------
+// Quaternion helpers (isomorphic CPU/GPU)
+//------------------------------------------------------------------------------
+
+GIAG_INLINE FQuat GIAG_NormalizeQuat(FQuat Q)
+{
+	const float Len2 = dot(Q, Q);
+	return Q * rsqrt(Len2);
+}
+
+// Hamilton product: B * A
+GIAG_INLINE FQuat GIAG_QuatMultiply(FQuat B, FQuat A)
+{
+	const float Bx = GIAG_GET4(B, 0), By = GIAG_GET4(B, 1), Bz = GIAG_GET4(B, 2), Bw = GIAG_GET4(B, 3);
+	const float Ax = GIAG_GET4(A, 0), Ay = GIAG_GET4(A, 1), Az = GIAG_GET4(A, 2), Aw = GIAG_GET4(A, 3);
+
+	return GIAG_FLOAT4(
+		Bw * Ax + Bx * Aw + By * Az - Bz * Ay,
+		Bw * Ay - Bx * Az + By * Aw + Bz * Ax,
+		Bw * Az + Bx * Ay - By * Ax + Bz * Aw,
+		Bw * Aw - Bx * Ax - By * Ay - Bz * Az);
+}
+
+GIAG_INLINE FQuat GIAG_QuatConjugate(FQuat Q)
+{
+	return GIAG_FLOAT4(-GIAG_GET4(Q, 0), -GIAG_GET4(Q, 1), -GIAG_GET4(Q, 2), GIAG_GET4(Q, 3));
+}
+
+GIAG_INLINE float3 GIAG_QuatRotateVector(FQuat Q, float3 V)
+{
+	// v' = q * (v,0) * q^-1
+	const float3 qv = GIAG_FLOAT3(GIAG_GET4(Q, 0), GIAG_GET4(Q, 1), GIAG_GET4(Q, 2));
+	const float qw = GIAG_GET4(Q, 3);
+	const float3 t = 2.0 * cross(qv, V);
+	return V + qw * t + cross(qv, t);
+}
+
+GIAG_INLINE FQuat GIAG_AlignQuatToRef(FQuat Ref, FQuat Q)
+{
+	if (dot(Ref, Q) < 0.0)
+	{
+		return Q * (-1.0);
+	}
+	return Q;
+}
+
+#endif // GIAG_MATH_SHARED_USH
+

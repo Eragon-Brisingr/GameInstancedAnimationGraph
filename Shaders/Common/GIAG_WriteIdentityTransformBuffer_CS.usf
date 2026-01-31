@@ -1,0 +1,40 @@
+// Writes identity bone transforms into UE SkinningSceneExtension TransformBuffer.
+// This is a bootstrap provider output; it will be replaced by "Pose -> TransformBuffer" once GIAG Runner is wired in.
+
+#include "/Engine/Public/Platform.ush"
+#include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
+
+RWByteAddressBuffer RW_TransformBuffer;
+
+uint TransformOffset;      // element offset (not bytes) into BoneTransforms
+uint MaxTransformCount;    // bones per pose
+uint AnimationSlotCount;   // number of animation slots (AnimationIndex capacity)
+
+[numthreads(64, 1, 1)]
+void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	uint LinearId = GroupId.x * 64u + GroupIndex;
+	uint Total = AnimationSlotCount * 2u * MaxTransformCount;
+	if (LinearId >= Total)
+	{
+		return;
+	}
+
+	uint BoneIndex = LinearId % MaxTransformCount;
+	uint Tmp = LinearId / MaxTransformCount; // 0..(AnimationSlotCount*2-1)
+
+	uint TransformIndex = TransformOffset + Tmp * MaxTransformCount + BoneIndex;
+
+	// Identity matrix in float4x3 format expected by StoreCompressedBoneTransform:
+	// [0..2] are axes, [3] is origin/translation.
+	float4x3 BoneXform =
+		float4x3(
+			float3(1, 0, 0),
+			float3(0, 1, 0),
+			float3(0, 0, 1),
+			float3(0, 0, 0)
+		);
+
+	StoreCompressedBoneTransform(RW_TransformBuffer, 0u, TransformIndex, BoneXform);
+}
+

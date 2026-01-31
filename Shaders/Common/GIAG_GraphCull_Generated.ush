@@ -1,0 +1,22 @@
+#pragma once
+
+// Fallback per-graph culling propagation.
+//
+// Real graphs override this file by injecting HLSL into the virtual path
+// `/GameInstancedAnimationGraphShader/GIAG_GraphCull_Generated.ush` via
+// FShaderCompilerEnvironment::IncludeVirtualPathToContentsMap.
+//
+// Contract: must provide
+//   void GIAG_GraphCull_Propagate(uint SlotIndex, inout uint WordsLocal[GIAG_MAX_GRAPH_NODES/32]);
+
+void GIAG_GraphCull_Propagate(uint SlotIndex, inout uint WordsLocal[GIAG_MAX_GRAPH_NODES / 32])
+{
+	// Safe fallback: conservative propagation.
+	// Mark all nodes as needed when per-graph generated cull HLSL is not injected.
+	// This preserves correctness (no node early-out), at the cost of no culling benefit.
+	for (uint NodeIndex = 0; NodeIndex < NumNodes; ++NodeIndex)
+	{
+		WordsLocal[NodeIndex >> 5] |= (1u << (NodeIndex & 31u));
+	}
+}
+

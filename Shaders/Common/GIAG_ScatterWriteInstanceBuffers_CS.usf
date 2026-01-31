@@ -1,0 +1,46 @@
+// GIAG RT direct-write: scatter per-instance world TRS into UE instancing buffers.
+// Used to apply CPU mode sync / hide writes for native attach mesh buckets.
+//
+// Output layout:
+//   RW_InstanceOrigin[Index] = float4(T.xyz, 0)
+//   RW_InstanceTransform[Index*3 + 0..2] = float4(Row.xyz, 0)
+
+#include "/Engine/Public/Platform.ush"
+#include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
+
+uint NumWrites;
+
+StructuredBuffer<uint> OutputIndices;
+StructuredBuffer<FGIAG_Transform> ValuesTransform;
+
+RWBuffer<float4> RW_InstanceOrigin;
+RWBuffer<float4> RW_InstanceTransform;
+
+[numthreads(64, 1, 1)]
+void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	const uint DispatchId = GroupId.x * 64u + GroupIndex;
+	if (DispatchId >= NumWrites)
+	{
+		return;
+	}
+
+	const uint OutIndex = OutputIndices[DispatchId];
+	const FGIAG_Transform V = ValuesTransform[DispatchId];
+
+	const uint Base = OutIndex * 3u;
+
+	const float4 Q = GIAG_NormalizeQuat(V.Rotation);
+	const float3 T = V.Translation;
+	const float3 S = V.Scale3D;
+
+	const float3 XAxis = GIAG_QuatRotateVector(Q, float3(1, 0, 0)) * S.x;
+	const float3 YAxis = GIAG_QuatRotateVector(Q, float3(0, 1, 0)) * S.y;
+	const float3 ZAxis = GIAG_QuatRotateVector(Q, float3(0, 0, 1)) * S.z;
+
+	RW_InstanceOrigin[OutIndex] = float4(T, 0.0);
+	RW_InstanceTransform[Base + 0u] = float4(XAxis, 0.0);
+	RW_InstanceTransform[Base + 1u] = float4(YAxis, 0.0);
+	RW_InstanceTransform[Base + 2u] = float4(ZAxis, 0.0);
+}
+

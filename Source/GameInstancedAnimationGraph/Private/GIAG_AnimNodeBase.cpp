@@ -1,0 +1,25 @@
+#include "GIAG_AnimNodeBase.h"
+
+#include "GameInstancedAnimationGraphSubsystem.h"
+#include "GIAG_AnimNodeMetaManager.h"
+
+void FGIAG_AnimNodeRef::MarkDirty() const
+{
+	check(NodeIndex != INDEX_NONE);
+	auto& Buckets = System->Buckets[BucketIndex];
+	auto& Shard = Buckets.Shards[ShardIndex];
+	Shard.MarkNodeParamDirty(NodeIndex, SlotIndex);
+}
+
+IGIAG_AnimNodeMeta::IGIAG_AnimNodeMeta()
+{
+	auto& Manager = FGIAG_AnimNodeMetaManager::Get();
+	Manager.Metas.Add(this);
+}
+
+IGIAG_AnimNodeMeta::~IGIAG_AnimNodeMeta()
+{
+	auto& Manager = FGIAG_AnimNodeMetaManager::Get();
+	Manager.Metas.RemoveSingleSwap(this);
+}
+

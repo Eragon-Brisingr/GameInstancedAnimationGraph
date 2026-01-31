@@ -1,0 +1,49 @@
+// GIAG ISPC math/types (CPU kernels) - intended to be isomorphic to GIAG_Math.ush
+// NOTE: Keep these structs POD and layout-stable.
+
+#ifndef GIAG_MATH_ISPH
+#define GIAG_MATH_ISPH
+
+// Use UE's ISPC math/types to match C++ behavior and keep consistency with shader math.
+#include "Math/Vector.isph"
+
+typedef FVector4f FQuat;     // (x,y,z,w) in .V[0..3]
+typedef FVector3f float3;    // (x,y,z) in .V[0..2]
+typedef FVector4f float4;    // (x,y,z,w) in .V[0..3]
+
+inline float3 make_float3(float x, float y, float z)
+{
+	float3 r;
+	r.V[0] = x;
+	r.V[1] = y;
+	r.V[2] = z;
+	return r;
+}
+
+inline float saturate(float v) { return min(1.0f, max(0.0f, v)); }
+inline float dot(float3 a, float3 b) { return VectorDot(a, b); }
+inline float dot(float4 a, float4 b) { return VectorDot(a, b); }
+
+inline float3 cross(float3 a, float3 b)
+{
+	// UE only provides VectorCross for FVector4*; lift to vec4(w=0) and drop w.
+	const float4 A4 = SetVector4(a, 0.0f);
+	const float4 B4 = SetVector4(b, 0.0f);
+	const float4 C4 = VectorCross(A4, B4);
+	return make_float3(C4.V[0], C4.V[1], C4.V[2]);
+}
+
+//------------------------------------------------------------------------------
+// Shared implementation wrapper (ISPC)
+//------------------------------------------------------------------------------
+
+#define GIAG_INLINE inline
+#define GIAG_FLOAT3(x,y,z) make_float3((x),(y),(z))
+#define GIAG_FLOAT4(x,y,z,w) SetVector4((x),(y),(z),(w))
+#define GIAG_GET3(v,i) ((v).V[(i)])
+#define GIAG_GET4(v,i) ((v).V[(i)])
+
+#include "GIAG_MathShared.ush"
+
+#endif // GIAG_MATH_ISPH
+

@@ -1,0 +1,17 @@
+// Common shader helpers for GameInstancedAnim (AnimGraph).
+
+#pragma once
+
+typedef float4 FQuat;
+
+//------------------------------------------------------------------------------
+// Shared implementation wrapper (HLSL)
+//------------------------------------------------------------------------------
+
+#define GIAG_INLINE inline
+#define GIAG_FLOAT3(x,y,z) float3(x,y,z)
+#define GIAG_FLOAT4(x,y,z,w) float4(x,y,z,w)
+#define GIAG_GET3(v,i) ((v)[i])
+#define GIAG_GET4(v,i) ((v)[i])
+
+#include "/GameInstancedAnimationGraphShader/Shared/GIAG_MathShared.ush"

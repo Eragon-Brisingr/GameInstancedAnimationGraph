@@ -1,0 +1,93 @@
+// GIAG native attach mesh: compute per-attachment world transform directly into UE instancing buffers.
+// This bypasses the Niagara OutTransform buffer entirely.
+//
+// Output layout (matches ISM convention):
+//   RW_InstanceOrigin[Index] = float4(Translation.xyz, 0)
+//   RW_InstanceTransform[Index*3 + 0] = float4(WorldXAxis.xyz, 0)
+//   RW_InstanceTransform[Index*3 + 1] = float4(WorldYAxis.xyz, 0)
+//   RW_InstanceTransform[Index*3 + 2] = float4(WorldZAxis.xyz, 0)
+
+#include "/Engine/Public/Platform.ush"
+#include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
+
+uint NumBones;
+uint NumAttachments;
+
+StructuredBuffer<int> ParentIndices;
+StructuredBuffer<FGIAG_BoneTRS> LocalPoseTRS; // slot-indexed, one per bone
+StructuredBuffer<FGIAG_Transform> ComponentToWorldBySlot; // slot-indexed (alias of FTransform3f layout)
+
+struct FGIAG_AttachDescPacked
+{
+	uint SlotIndex;
+	uint BoneIndex;
+	uint OutputIndex;
+	uint Flags;
+	FGIAG_BoneTRS SocketLocalTRS; // bone-local socket transform
+};
+
+StructuredBuffer<FGIAG_AttachDescPacked> AttachDescs;
+
+RWBuffer<float4> RW_InstanceOrigin;     // [Index]
+RWBuffer<float4> RW_InstanceTransform;  // [Index*3 + 0..2]
+
+FGIAG_BoneTRS ReadLocalPoseTRS(in uint SlotIndex, in uint BoneIndex)
+{
+	return LocalPoseTRS[SlotIndex * NumBones + BoneIndex];
+}
+
+[numthreads(THREADS_X, 1, 1)]
+void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	const uint DispatchId = GroupId.x * THREADS_X + GroupIndex;
+	if (DispatchId >= NumAttachments)
+	{
+		return;
+	}
+
+	const FGIAG_AttachDescPacked D = AttachDescs[DispatchId];
+
+	// If CPU mode/proxy wants to own/hide this output, skip GPU writes so we don't overwrite
+	// the RT direct-write path coming from GT via AttachBus.
+	const uint GIAG_AttachFlag_SkipGpuWrite = 1u;
+	if ((D.Flags & GIAG_AttachFlag_SkipGpuWrite) != 0u)
+	{
+		return;
+	}
+
+	// Bone global (component space) from local pose chain.
+	FGIAG_BoneTRS GlobalT = ReadLocalPoseTRS(D.SlotIndex, D.BoneIndex);
+	int Parent = ParentIndices[D.BoneIndex];
+	int Guard = (int)NumBones + 1;
+	while (Parent >= 0 && Guard-- > 0)
+	{
+		FGIAG_BoneTRS ParentLocal = ReadLocalPoseTRS(D.SlotIndex, (uint)Parent);
+		GlobalT = GIAG_MultiplyBoneTRS(GlobalT, ParentLocal);
+		Parent = ParentIndices[Parent];
+	}
+
+	// Socket in component space: BoneGlobal ∘ SocketLocal.
+	FGIAG_BoneTRS SocketCS = GIAG_MultiplyBoneTRS(D.SocketLocalTRS, GlobalT);
+
+	// World: ComponentToWorld ∘ SocketCS.
+	FGIAG_Transform C2W = ComponentToWorldBySlot[D.SlotIndex];
+	FGIAG_Transform SocketWS = GIAG_MultiplyTransformTRS(SocketCS, C2W);
+
+	const uint OutIndex = D.OutputIndex;
+	const uint Base = OutIndex * 3u;
+
+	const float4 Q = GIAG_NormalizeQuat(SocketWS.Rotation);
+	const float3 T = SocketWS.Translation;
+	const float3 S = SocketWS.Scale3D;
+
+	// Build world-space basis axes from quaternion, then apply non-uniform scale along local axes.
+	const float3 XAxis = GIAG_QuatRotateVector(Q, float3(1, 0, 0)) * S.x;
+	const float3 YAxis = GIAG_QuatRotateVector(Q, float3(0, 1, 0)) * S.y;
+	const float3 ZAxis = GIAG_QuatRotateVector(Q, float3(0, 0, 1)) * S.z;
+
+	RW_InstanceOrigin[OutIndex] = float4(T, 0.0);
+	RW_InstanceTransform[Base + 0u] = float4(XAxis, 0.0);
+	RW_InstanceTransform[Base + 1u] = float4(YAxis, 0.0);
+	RW_InstanceTransform[Base + 2u] = float4(ZAxis, 0.0);
+}
+

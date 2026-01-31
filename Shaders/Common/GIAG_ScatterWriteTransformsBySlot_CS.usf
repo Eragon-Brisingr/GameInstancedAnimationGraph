@@ -1,0 +1,33 @@
+// GIAG RT direct-write: scatter per-slot transforms into slot-indexed buffers.
+// Used to apply incremental dirty slot updates without many CopyBufferPass uploads.
+//
+// Output layout:
+//   RW_ComponentToWorldBySlot[Slot] = FGIAG_Transform
+//   RW_WorldToComponentBySlot[Slot] = FGIAG_Transform
+//
+#include "/Engine/Public/Platform.ush"
+#include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
+
+uint NumWrites;
+
+StructuredBuffer<uint> OutputIndices; // SlotIndex
+StructuredBuffer<FGIAG_Transform> ValuesComponentToWorld;
+StructuredBuffer<FGIAG_Transform> ValuesWorldToComponent;
+
+RWStructuredBuffer<FGIAG_Transform> RW_ComponentToWorldBySlot;
+RWStructuredBuffer<FGIAG_Transform> RW_WorldToComponentBySlot;
+
+[numthreads(64, 1, 1)]
+void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	const uint DispatchId = GroupId.x * 64u + GroupIndex;
+	if (DispatchId >= NumWrites)
+	{
+		return;
+	}
+
+	const uint SlotIndex = OutputIndices[DispatchId];
+	RW_ComponentToWorldBySlot[SlotIndex] = ValuesComponentToWorld[DispatchId];
+	RW_WorldToComponentBySlot[SlotIndex] = ValuesWorldToComponent[DispatchId];
+}
+

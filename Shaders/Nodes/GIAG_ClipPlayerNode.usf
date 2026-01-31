@@ -1,0 +1,216 @@
+// Clip player -> LocalPose compute shader.
+// Output: LocalPoseTRS (FGIAG_BoneTRS), 1 element per bone (slot-indexed).
+
+#include "/Engine/Public/Platform.ush"
+#include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
+
+uint NumBones;
+uint NumInstances;
+float CurrentTimeSeconds;
+uint DispatchGroupCountX;
+uint DispatchGroupCountY;
+uint DispatchGroupOffset;
+
+StructuredBuffer<FGIAG_ClipMeta> ClipMetas;
+
+StructuredBuffer<FGIAG_SlotState> SlotStates;
+StructuredBuffer<uint> ActiveInstanceIndices; // ActiveIndex -> SlotIndex
+StructuredBuffer<uint> NeedNodeBits;
+uint NeedNodeWordsPerSlot;
+uint NodeIndex;
+StructuredBuffer<FGIAG_BoneTRS> AnimTRS;
+StructuredBuffer<FGIAG_BoneTRS> RefPoseLocalTRS;
+RWStructuredBuffer<FGIAG_BoneTRS> RW_OutPose;
+
+void GIAG_ComputeSlotBlendWeights(
+	float CurrentTimeSeconds,
+	FGIAG_SlotState S,
+	uint N,
+	out float W0,
+	out float W1,
+	out float W2,
+	out float W3)
+{
+	const float EPS = 1e-4;
+	W0 = 0.0;
+	W1 = 0.0;
+	W2 = 0.0;
+	W3 = 0.0;
+
+	float A0 = (N >= 2u) ? GIAG_CalcBlendAlpha(CurrentTimeSeconds, S.BlendStartTimes[0], S.BlendDurations[0]) : 0.0;
+	float A1 = (N >= 3u) ? GIAG_CalcBlendAlpha(CurrentTimeSeconds, S.BlendStartTimes[1], S.BlendDurations[1]) : 0.0;
+	float A2 = (N >= 4u) ? GIAG_CalcBlendAlpha(CurrentTimeSeconds, S.BlendStartTimes[2], S.BlendDurations[2]) : 0.0;
+
+	// Early-out: last clip fully blended in (matches CPU semantics).
+	if (N >= 3u)
+	{
+		float ALast = (N == 3u) ? A1 : A2;
+		if (ALast >= 1.0 - EPS)
+		{
+			if (N == 3u) { W2 = 1.0; }
+			else { W3 = 1.0; }
+			return;
+		}
+	}
+
+	if (N == 1u) { W0 = 1.0; return; }
+	if (N == 2u)
+	{
+		W0 = 1.0 - A0;
+		W1 = A0;
+		return;
+	}
+	if (N == 3u)
+	{
+		float Om1 = 1.0 - A1;
+		W0 = Om1 * (1.0 - A0);
+		W1 = Om1 * A0;
+		W2 = A1;
+		return;
+	}
+
+	float Om2 = 1.0 - A2;
+	float Om1 = 1.0 - A1;
+	W0 = Om2 * Om1 * (1.0 - A0);
+	W1 = Om2 * Om1 * A0;
+	W2 = Om2 * A1;
+	W3 = A2;
+}
+
+[numthreads(THREADS_X, THREADS_Y, THREADS_Z)]
+void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	uint GroupLinear =
+		DispatchGroupOffset +
+		GroupId.x +
+		GroupId.y * DispatchGroupCountX +
+		GroupId.z * (DispatchGroupCountX * DispatchGroupCountY);
+	uint DispatchId = GroupLinear * (THREADS_X * THREADS_Y * THREADS_Z) + GroupIndex;
+	uint Total = NumBones * NumInstances;
+	if (DispatchId >= Total)
+	{
+		return;
+	}
+
+	uint ActiveIndex = DispatchId / NumBones;
+	uint BoneIndex = DispatchId - ActiveIndex * NumBones;
+
+	uint SlotIndex = ActiveInstanceIndices[ActiveIndex];
+	uint OutIndex = SlotIndex * NumBones + BoneIndex;
+
+	if (NeedNodeWordsPerSlot != 0u && !GIAG_IsNodeNeeded(NeedNodeBits, NeedNodeWordsPerSlot, NodeIndex, SlotIndex))
+	{
+		return;
+	}
+
+	// If no clips are active, output RefPose (local) directly.
+	FGIAG_SlotState S = SlotStates[SlotIndex];
+	if (S.NumClips == 0u)
+	{
+		RW_OutPose[OutIndex] = RefPoseLocalTRS[BoneIndex];
+	}
+	else
+	{
+		uint N = min(4u, S.NumClips);
+		if (N == 0u) { N = 1u; }
+
+		float W0 = 0.0;
+		float W1 = 0.0;
+		float W2 = 0.0;
+		float W3 = 0.0;
+		GIAG_ComputeSlotBlendWeights(CurrentTimeSeconds, S, N, W0, W1, W2, W3);
+
+		// Only sample clips that actually contribute.
+		bool bUse0 = (W0 != 0.0) && (S.NumClips >= 1u);
+		bool bUse1 = (W1 != 0.0) && (S.NumClips >= 2u);
+		bool bUse2 = (W2 != 0.0) && (S.NumClips >= 3u);
+		bool bUse3 = (W3 != 0.0) && (S.NumClips >= 4u);
+
+		// Fast-path: single contributing clip -> direct write (no extra loads/math).
+		if (bUse0 && !bUse1 && !bUse2 && !bUse3)
+		{
+			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, CurrentTimeSeconds, S.Clips[0]);
+			RW_OutPose[OutIndex] = AnimTRS[Base + BoneIndex];
+			return;
+		}
+		if (!bUse0 && bUse1 && !bUse2 && !bUse3)
+		{
+			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, CurrentTimeSeconds, S.Clips[1]);
+			RW_OutPose[OutIndex] = AnimTRS[Base + BoneIndex];
+			return;
+		}
+		if (!bUse0 && !bUse1 && bUse2 && !bUse3)
+		{
+			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, CurrentTimeSeconds, S.Clips[2]);
+			RW_OutPose[OutIndex] = AnimTRS[Base + BoneIndex];
+			return;
+		}
+		if (!bUse0 && !bUse1 && !bUse2 && bUse3)
+		{
+			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, CurrentTimeSeconds, S.Clips[3]);
+			RW_OutPose[OutIndex] = AnimTRS[Base + BoneIndex];
+			return;
+		}
+
+		FGIAG_BoneTRS T0 = GIAG_MakeIdentityTRS();
+		FGIAG_BoneTRS T1 = T0;
+		FGIAG_BoneTRS T2 = T0;
+		FGIAG_BoneTRS T3 = T0;
+		if (bUse0)
+		{
+			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, CurrentTimeSeconds, S.Clips[0]);
+			T0 = AnimTRS[Base + BoneIndex];
+		}
+		if (bUse1)
+		{
+			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, CurrentTimeSeconds, S.Clips[1]);
+			T1 = AnimTRS[Base + BoneIndex];
+		}
+		if (bUse2)
+		{
+			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, CurrentTimeSeconds, S.Clips[2]);
+			T2 = AnimTRS[Base + BoneIndex];
+		}
+		if (bUse3)
+		{
+			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, CurrentTimeSeconds, S.Clips[3]);
+			T3 = AnimTRS[Base + BoneIndex];
+		}
+
+		// Blend4: translation/scale linear; rotation weighted nlerp with sign alignment (skip exact-zero weights).
+		FGIAG_BoneTRS R;
+		R.Translation = float3(0.0, 0.0, 0.0);
+		R.Scale3D = float3(0.0, 0.0, 0.0);
+		if (W0 != 0.0) { R.Translation += T0.Translation * W0; R.Scale3D += T0.Scale3D * W0; }
+		if (W1 != 0.0) { R.Translation += T1.Translation * W1; R.Scale3D += T1.Scale3D * W1; }
+		if (W2 != 0.0) { R.Translation += T2.Translation * W2; R.Scale3D += T2.Scale3D * W2; }
+		if (W3 != 0.0) { R.Translation += T3.Translation * W3; R.Scale3D += T3.Scale3D * W3; }
+		R.TranslationPad = 0.0;
+		R.ScalePad = 0.0;
+
+		FQuat Ref = float4(0.0, 0.0, 0.0, 1.0);
+		bool bHasRef = false;
+		if (W0 != 0.0) { Ref = T0.Rotation; bHasRef = true; }
+		else if (W1 != 0.0) { Ref = T1.Rotation; bHasRef = true; }
+		else if (W2 != 0.0) { Ref = T2.Rotation; bHasRef = true; }
+		else if (W3 != 0.0) { Ref = T3.Rotation; bHasRef = true; }
+		if (!bHasRef)
+		{
+			R.Rotation = float4(0.0, 0.0, 0.0, 1.0);
+			RW_OutPose[OutIndex] = R;
+			return;
+		}
+		Ref = GIAG_NormalizeQuat(Ref);
+
+		FQuat Q = float4(0.0, 0.0, 0.0, 0.0);
+		if (W0 != 0.0) { Q += GIAG_AlignQuatToRef(Ref, T0.Rotation) * W0; }
+		if (W1 != 0.0) { Q += GIAG_AlignQuatToRef(Ref, T1.Rotation) * W1; }
+		if (W2 != 0.0) { Q += GIAG_AlignQuatToRef(Ref, T2.Rotation) * W2; }
+		if (W3 != 0.0) { Q += GIAG_AlignQuatToRef(Ref, T3.Rotation) * W3; }
+		R.Rotation = GIAG_NormalizeQuat(Q);
+
+		RW_OutPose[OutIndex] = R;
+	}
+}
+
+

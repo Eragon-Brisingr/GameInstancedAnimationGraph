@@ -1,0 +1,33 @@
+// GIAG RT direct-write: scatter per-instance world Transform into the OutTransform buffer.
+// Used to apply CPU mode sync / hide writes without scheduling many CopyBufferPasses.
+//
+// Output layout (same as GIAG_AttachToTransformBuffer_CS.usf):
+//   [Index*3+0] = Rotation(x,y,z,w)
+//   [Index*3+1] = Translation(x,y,z,0)
+//   [Index*3+2] = Scale(x,y,z,0)
+
+#include "/Engine/Public/Platform.ush"
+#include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
+
+uint NumWrites;
+
+StructuredBuffer<uint> OutputIndices;
+StructuredBuffer<FGIAG_Transform> ValuesTransform;
+
+RWStructuredBuffer<FGIAG_Transform> RW_FxTransform;
+
+[numthreads(64, 1, 1)]
+void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	const uint DispatchId = GroupId.x * 64u + GroupIndex;
+	if (DispatchId >= NumWrites)
+	{
+		return;
+	}
+
+	const uint OutIndex = OutputIndices[DispatchId];
+	const FGIAG_Transform V = ValuesTransform[DispatchId];
+
+	RW_FxTransform[OutIndex] = V;
+}
+

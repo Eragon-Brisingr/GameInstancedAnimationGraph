@@ -1,0 +1,19 @@
+// Fill RW uint buffer with a constant value.
+
+#include "/Engine/Public/Platform.ush"
+
+uint NumDwords;
+uint Value;
+RWStructuredBuffer<uint> RW_Out;
+
+[numthreads(THREADS_X, 1, 1)]
+void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	uint Id = GroupId.x * THREADS_X + GroupIndex;
+	if (Id >= NumDwords)
+	{
+		return;
+	}
+	RW_Out[Id] = Value;
+}
+
