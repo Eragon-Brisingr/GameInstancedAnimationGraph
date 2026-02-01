@@ -238,6 +238,7 @@ class GAMEINSTANCEDANIMATIONGRAPH_API UGameInstancedAnimationGraphSubsystem : pu
 	friend FGameInstancedAnimationGraphHandle;
 	friend FGameInstancedAnimationAttachHandle;
 public:
+	bool DoesSupportWorldType(const EWorldType::Type WorldType) const override { return WorldType != EWorldType::None && WorldType != EWorldType::Inactive && WorldType != EWorldType::GameRPC; }
 	TStatId GetStatId() const override { RETURN_QUICK_DECLARE_CYCLE_STAT(GameInstancedAnimSubsystem, STATGROUP_Tickables); }
 	bool IsTickableInEditor() const override { return true; }
 	void Tick(float DeltaTime) override;
@@ -246,6 +247,9 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim")
 	FGameInstancedAnimationGraphHandle AddInstance(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph, const FTransform& Transform, TSubclassOf<AActor> CpuProxyClass, bool bCpuMode = false);
+
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|CPU")
+	FGameInstancedAnimationGraphHandle AddInstanceWithExternalProxyActor(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph, const FTransform& Transform, AActor* CpuProxyActor);
 
 	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim")
 	void RemoveInstance(UPARAM(Ref)FGameInstancedAnimationGraphHandle& Handle);
@@ -873,6 +877,7 @@ public:
 
 		UInstancedSkinnedMeshComponent* ISKMC = nullptr;
 		AActor* CpuProxyActor = nullptr;
+		bool bExternalCpuProxyActor = false;
 		/** CPU-only follow component (only valid when MasterRecordIndex!=INDEX_NONE). Owned by master's CpuProxyActor. */
 		USkinnedMeshComponent* CpuFollowSkinnedMesh = nullptr;
 		TSubclassOf<AActor> CpuProxyClass;
@@ -899,6 +904,15 @@ public:
 
 	FInstancedAnimRecord* ResolveRecord(const FGameInstancedAnimationGraphHandle& Handle);
 	const FInstancedAnimRecord* ResolveRecord(const FGameInstancedAnimationGraphHandle& Handle) const { return const_cast<ThisClass*>(this)->ResolveRecord(Handle); }
+
+	// ---- Instance creation (shared core) ----
+	FGameInstancedAnimationGraphHandle AddInstance_Internal(
+		USkeletalMesh* SkeletalMesh,
+		UGIAG_AnimGraph* AnimGraph,
+		const FTransform& Transform,
+		TSubclassOf<AActor> CpuProxyClass,
+		bool bCpuMode,
+		AActor* ExternalCpuProxyActor);
 
 	// ---- Backend switching helpers (GT only; master instances only) ----
 	void SwitchMasterGpuToCpu(const FGameInstancedAnimationGraphHandle& Handle, FInstancedAnimRecord* Rec);

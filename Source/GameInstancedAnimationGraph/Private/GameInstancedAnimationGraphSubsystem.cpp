@@ -1510,11 +1510,27 @@ void UGameInstancedAnimationGraphSubsystem::CleanupShardIfEmpty(int32 BucketInde
 
 FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddInstance(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph, const FTransform& Transform, TSubclassOf<AActor> CpuProxyClass, bool bCpuMode)
 {
+	return AddInstance_Internal(SkeletalMesh, AnimGraph, Transform, CpuProxyClass, bCpuMode, /*ExternalCpuProxyActor*/nullptr);
+}
+
+FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddInstance_Internal(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph, const FTransform& Transform, TSubclassOf<AActor> CpuProxyClass, bool bCpuMode, AActor* ExternalCpuProxyActor)
+{
+	check(IsInGameThread());
+
 	FGameInstancedAnimationGraphHandle Handle;
 
 	if (SkeletalMesh == nullptr || !AnimGraph)
 	{
 		return Handle;
+	}
+
+	// External proxy actor => CPU-only, reuse this actor and never spawn/destroy.
+	if (ExternalCpuProxyActor)
+	{
+		checkf(bCpuMode, TEXT("GIAG ExternalProxyActor path must be CPU-only."));
+		check(ExternalCpuProxyActor->GetWorld() == GetWorld());
+		check(ExternalCpuProxyActor->GetClass()->ImplementsInterface(UGIAG_ActorInterface::StaticClass()));
+		CpuProxyClass = ExternalCpuProxyActor->GetClass();
 	}
 
 	USkeleton* Skeleton = SkeletalMesh->GetSkeleton();
@@ -1665,7 +1681,7 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddIns
 
 	// Create backend:
 	// - GPU: create ISKMC instance immediately.
-	// - CPU: create a slot-only record, then spawn CpuProxyActor (no ISKMC instance).
+	// - CPU: create a slot-only record, then spawn CpuProxyActor (no ISKMC instance), or reuse an external proxy actor.
 	if (!bCpuMode)
 	{
 		check(Shard.ISKMC);
@@ -1682,10 +1698,29 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddIns
 		NewRecord.InstanceId = FPrimitiveInstanceId();
 		FPrivateUtils::AddSlotToList(Shard.CpuAliveSlots, Shard.CpuAliveListIndexBySlot, SlotIndex);
 		FInstancedAnimRecord& Rec = AnimRecords[RecordIndex];
-		Rec.CpuProxyActor = FPrivateUtils::SpawnCpuProxyActor(Handle, Rec, GetWorld(), Transform);
+		if (ExternalCpuProxyActor)
+		{
+			Rec.CpuProxyActor = ExternalCpuProxyActor;
+			Rec.bExternalCpuProxyActor = true;
+			Rec.CpuProxyClass = ExternalCpuProxyActor->GetClass();
+			IGIAG_ActorInterface::Execute_SetInstancedAnimationGraphHandle(ExternalCpuProxyActor, Handle);
+			ExternalCpuProxyActor->SetActorTransform(Transform);
+		}
+		else
+		{
+			Rec.CpuProxyActor = FPrivateUtils::SpawnCpuProxyActor(Handle, Rec, GetWorld(), Transform);
+		}
 	}
 
 	return Handle;
+}
+
+FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddInstanceWithExternalProxyActor(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph, const FTransform& Transform, AActor* CpuProxyActor)
+{
+	USkeletalMeshComponent* SkeletalMeshComponent = IGIAG_ActorInterface::Execute_GetInstancedAnimationSkinnedMesh(CpuProxyActor);
+	check(SkeletalMeshComponent);
+	check(SkeletalMeshComponent->GetSkeletalMeshAsset() == SkeletalMesh);
+	return AddInstance_Internal(SkeletalMesh, AnimGraph, Transform, CpuProxyActor ? CpuProxyActor->GetClass() : nullptr, /*bCpuMode*/true, CpuProxyActor);
 }
 
 void UGameInstancedAnimationGraphSubsystem::SetInstanceUseCPUMode(const FGameInstancedAnimationGraphHandle& Handle, bool bUseCPU)
@@ -1703,6 +1738,12 @@ void UGameInstancedAnimationGraphSubsystem::SetInstanceUseCPUMode(const FGameIns
 	const bool bIsCPU = (Rec->CpuProxyActor != nullptr);
 	if (bUseCPU == bIsCPU)
 	{
+		return;
+	}
+
+	if (!bUseCPU && Rec->bExternalCpuProxyActor)
+	{
+		// External proxy actor path is CPU-only by contract.
 		return;
 	}
 
@@ -2858,7 +2899,16 @@ void UGameInstancedAnimationGraphSubsystem::RemoveInstance(FGameInstancedAnimati
 
 		FPrivateUtils::RemoveSlotFromList(Shard.CpuAliveSlots, Shard.CpuAliveListIndexBySlot, SlotIndex);
 
-		ProxyActor->Destroy();
+		// If proxy actor is external, we do NOT destroy it.
+		if (Rec->bExternalCpuProxyActor)
+		{
+			check(ProxyActor->GetClass()->ImplementsInterface(UGIAG_ActorInterface::StaticClass()));
+			IGIAG_ActorInterface::Execute_SetInstancedAnimationGraphHandle(ProxyActor, FGameInstancedAnimationGraphHandle{});
+		}
+		else
+		{
+			ProxyActor->Destroy();
+		}
 		ProxyActor = nullptr;
 		Bucket.NumInstances = FMath::Max(0, Bucket.NumInstances - 1);
 
