@@ -164,8 +164,6 @@ FGIAG_AnimGraphCpuRunner::FOutputs FGIAG_AnimGraphCpuRunner::Evaluate(
 
 	// Bitset layout (node-indexed):
 	// - Pack 32 node flags into one uint32 word.
-	// - WordIndex = NodeIndex / 32  == (NodeIndex >> 5)
-	// - BitIndex  = NodeIndex % 32  == (NodeIndex & 31)
 	// - Mask      = 1u << BitIndex
 	const uint32 WordsPerSlot = bShouldCullNodes ? FMath::DivideAndRoundUp<uint32>((uint32)CompiledData.NumNodes, 32u) : 0u;
 	TArray<uint32, TInlineAllocator<8>> AnyNodeWords;
@@ -173,74 +171,105 @@ FGIAG_AnimGraphCpuRunner::FOutputs FGIAG_AnimGraphCpuRunner::Evaluate(
 	{
 		AnyNodeWords.SetNumZeroed((int32)FMath::Max(1u, WordsPerSlot));
 
-		auto AllInputsMask = [](uint32 NumInputs) -> uint32
+		auto SetNodeBit = [](TArray<uint32, TInlineAllocator<8>>& Words, uint32 NodeIdx)
 		{
-			// bit i => input pin i is needed
-			if (NumInputs >= 32u) { return 0xFFFFFFFFu; }
-			return (NumInputs == 0u) ? 0u : ((1u << NumInputs) - 1u);
+			Words[NodeIdx / 32] |= (1u << (NodeIdx % 32));
 		};
-
-		auto SetNodeBit = [](TArray<uint32, TInlineAllocator<8>>& Words, int32 NodeIdx)
+		auto TestNodeBit = [](const TArray<uint32, TInlineAllocator<8>>& Words, uint32 NodeIdx) -> bool
 		{
-			const uint32 U = (uint32)NodeIdx;
-			Words[(int32)(U >> 5)] |= (1u << (U & 31u));
-		};
-		auto TestNodeBit = [](const TArray<uint32, TInlineAllocator<8>>& Words, int32 NodeIdx) -> bool
-		{
-			const uint32 U = (uint32)NodeIdx;
-			return (Words[(int32)(U >> 5)] & (1u << (U & 31u))) != 0u;
+			return (Words[NodeIdx / 32] & (1u << (NodeIdx % 32))) != 0u;
 		};
 
 		TArray<uint32, TInlineAllocator<8>> LocalWords;
-		LocalWords.SetNumZeroed((int32)FMath::Max(1u, WordsPerSlot));
+		LocalWords.SetNumZeroed(FMath::Max(1u, WordsPerSlot));
 
-		for (const uint32 SlotU : Params.ActiveInstanceIndices)
+		// Batch-compute cull NeedMask for all cull-capable node types.
+		// Uses precompiled CullDispatchSchedule/CullIndexByNode to avoid per-frame scans.
+		check(CompiledData.NumInputPinsByNode.Num() == CompiledData.NumNodes);
+		check(CompiledData.CullIndexByNode.Num() == CompiledData.NumNodes);
+
+		TArray<uint32> CullNeedMasks;
+		CullNeedMasks.SetNumUninitialized(FMath::Max(1, CompiledData.NumCullNodes * Params.NumInstances));
+
+		if (CompiledData.NumCullNodes > 0)
 		{
-			const int32 SlotIndex = (int32)SlotU;
+			FGIAG_AnimNodeCpuCullContext CullContext
+			{
+				.NumInstances = Params.NumInstances,
+				.SlotCapacity = Params.SlotCapacity,
+				.ActiveInstanceIndices = Params.ActiveInstanceIndices,
+				.NumInputsByNode = CompiledData.NumInputPinsByNode,
+				.NodeData = Params.NodeData,
+				.NodeStrideBytes = Params.NodeStrideBytes,
+			};
+
+			for (const FGIAG_AnimDispatchBatch& Batch : CompiledData.CullDispatchSchedule)
+			{
+				check(Batch.NodeIndices.Num() > 0);
+				const int32 FirstNodeIdx = Batch.NodeIndices[0];
+				const IGIAG_AnimNodeMeta* Meta = CompiledData.Nodes[FirstNodeIdx].NodeMeta;
+				check(Meta != nullptr && Meta->HasCullLogic());
+
+				const int32 BaseCullIndex = CompiledData.CullIndexByNode[FirstNodeIdx];
+				check(BaseCullIndex >= 0);
+
+				const TConstArrayView<int32> NodeIndicesView = Batch.NodeIndices;
+				TArrayView<uint32> OutView(
+					CullNeedMasks.GetData() + (int64)BaseCullIndex * (int64)Params.NumInstances,
+					(int32)((int64)Batch.NodeIndices.Num() * (int64)Params.NumInstances));
+				Meta->ComputeCullNeedMasksCPU(CullContext, NodeIndicesView, OutView);
+			}
+		}
+
+		for (int32 ActiveIndex = 0; ActiveIndex < Params.NumInstances; ++ActiveIndex)
+		{
+			const int32 SlotIndex = (int32)Params.ActiveInstanceIndices[ActiveIndex];
 			check(SlotIndex >= 0 && SlotIndex < Params.SlotCapacity);
 
 			// Start from the final node for this slot, then propagate dependencies backwards.
 			for (int32 w = 0; w < (int32)WordsPerSlot; ++w) { LocalWords[w] = 0u; }
 			SetNodeBit(LocalWords, CompiledData.FinalPoseOutput.NodeIndex);
 
-			// Reverse topological order: when a node is needed, mark its needed inputs as needed.
-			for (int32 i = CompiledData.ExecOrder.Num() - 1; i >= 0; --i)
+			// Reverse topological order (batched by type): when a node is needed, mark its needed inputs as needed.
+			// This is equivalent to iterating ExecOrder from back to front, but uses pre-built reverse batches.
+			checkf(CompiledData.ReverseDispatchSchedule.Num() > 0, TEXT("GIAG CPU: ReverseDispatchSchedule must be built at compile time."));
+			for (const FGIAG_AnimDispatchBatch& RB : CompiledData.ReverseDispatchSchedule)
 			{
-				const int32 NodeIdx = CompiledData.ExecOrder[i];
-				check(NodeIdx >= 0 && NodeIdx < CompiledData.NumNodes);
-
-				if (!TestNodeBit(LocalWords, NodeIdx))
+				for (const int32 NodeIdx : RB.NodeIndices)
 				{
-					continue;
-				}
+					check(NodeIdx >= 0 && NodeIdx < CompiledData.NumNodes);
 
-				const FGIAG_AnimCompiledNode& Node = CompiledData.Nodes[NodeIdx];
-				const IGIAG_AnimNodeMeta* Meta = Node.NodeMeta;
-				check(Meta != nullptr);
-
-				const uint32 NumInputs = (uint32)Node.NumInputPins;
-				uint32 NeedMask = AllInputsMask(NumInputs);
-
-				// If this node provides cull logic, it may skip some inputs based on per-slot node state.
-				if (Meta->HasCullLogic())
-				{
-					check(Params.NodeData[NodeIdx] != nullptr);
-					const uint8* NodePtr = Params.NodeData[NodeIdx] + (int64)Params.NodeStrideBytes[NodeIdx] * (int64)SlotIndex;
-					NeedMask = Meta->ComputeCullNeedMaskCPU(NumInputs, NodePtr);
-				}
-
-				check(Node.InputSources.Num() == Node.NumInputPins);
-				for (uint32 Pin = 0; Pin < NumInputs; ++Pin)
-				{
-					if ((NeedMask & (1u << Pin)) == 0u)
+					if (!TestNodeBit(LocalWords, NodeIdx))
 					{
 						continue;
 					}
 
-					const int32 SrcNode = Node.InputSources[(int32)Pin].NodeIndex;
-					if (SrcNode >= 0)
+					const FGIAG_AnimCompiledNode& Node = CompiledData.Nodes[NodeIdx];
+					check(Node.NodeMeta != nullptr);
+
+					const uint32 NumInputs = (uint32)Node.NumInputPins;
+					uint32 NeedMask = GIAG::AllInputsMask(NumInputs);
+
+					// If this node type provides cull logic, look up the precomputed per-(node,active) need-mask.
+					const int32 CullIdx = CompiledData.CullIndexByNode[NodeIdx];
+					if (CullIdx != INDEX_NONE)
 					{
-						SetNodeBit(LocalWords, SrcNode);
+						NeedMask = CullNeedMasks[(int64)CullIdx * (int64)Params.NumInstances + (int64)ActiveIndex];
+					}
+
+					check(Node.InputSources.Num() == Node.NumInputPins);
+					for (uint32 Pin = 0; Pin < NumInputs; ++Pin)
+					{
+						if ((NeedMask & (1u << Pin)) == 0u)
+						{
+							continue;
+						}
+
+						const int32 SrcNode = Node.InputSources[(int32)Pin].NodeIndex;
+						if (SrcNode >= 0)
+						{
+							SetNodeBit(LocalWords, (uint32)SrcNode);
+						}
 					}
 				}
 			}
@@ -252,14 +281,13 @@ FGIAG_AnimGraphCpuRunner::FOutputs FGIAG_AnimGraphCpuRunner::Evaluate(
 		}
 	}
 
-	auto IsNodeNeededAnySlot = [&](int32 NodeIdx) -> bool
+	auto IsNodeNeededAnySlot = [&](uint32 NodeIdx) -> bool
 	{
 		if (!bShouldCullNodes)
 		{
 			return true;
 		}
-		const uint32 U = (uint32)NodeIdx;
-		return (AnyNodeWords[(int32)(U >> 5)] & (1u << (U & 31u))) != 0u;
+		return (AnyNodeWords[NodeIdx / 32] & (1u << (NodeIdx % 32))) != 0u;
 	};
 
 	// Execute schedule (batch-based).

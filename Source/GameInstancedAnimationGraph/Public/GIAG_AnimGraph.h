@@ -94,6 +94,29 @@ struct FGIAG_AnimGraphCompiledData
 
 	TArray<FGIAG_AnimDispatchBatch> DispatchSchedule;
 
+	/**
+	 * Reverse topological order grouped by node type.
+	 *
+	 * Equivalent to iterating ExecOrder from back to front, but expressed as batches:
+	 * - batches are in reverse execution order
+	 * - within each batch, NodeIndices are also in reverse order
+	 *
+	 * Used by CPU node cull propagation to traverse "reverse ExecOrder" without scanning ExecOrder directly.
+	 */
+	TArray<FGIAG_AnimDispatchBatch> ReverseDispatchSchedule;
+
+	/** NodeIndex -> NumInputPins (stored as uint16 for cache-friendly CPU cull). */
+	TArray<uint16> NumInputPinsByNode;
+
+	/** Number of nodes that have cull logic (size of CullDispatchSchedule flattened). */
+	int32 NumCullNodes = 0;
+
+	/** NodeIndex -> CullIndex (INDEX_NONE if node type has no cull logic). */
+	TArray<int32> CullIndexByNode;
+
+	/** DispatchSchedule filtered to only node types that have cull logic (same order as DispatchSchedule). */
+	TArray<FGIAG_AnimDispatchBatch> CullDispatchSchedule;
+
 	/** Which output pose pin is the final pose to be skinned. */
 	FGIAG_AnimOutputPinRef FinalPoseOutput;
 

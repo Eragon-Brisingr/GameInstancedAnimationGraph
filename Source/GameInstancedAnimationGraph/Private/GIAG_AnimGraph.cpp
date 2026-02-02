@@ -4,6 +4,7 @@
 #include "GIAG_AnimGraphShaders.h"
 #include "GIAG_GraphCullShaderMap.h"
 #include "GIAG_GraphCullConstants.h"
+#include "Algo/Reverse.h"
 #include "Interfaces/ITargetPlatform.h"
 #include "Misc/Crc.h"
 #include "Misc/SecureHash.h"
@@ -527,6 +528,56 @@ const FGIAG_AnimGraphCompiledData& UGIAG_AnimGraph::Compile()
 		else
 		{
 			Compiled.DispatchSchedule.Last().NodeIndices.Add(NodeIdx);
+		}
+	}
+
+	// Reverse dispatch schedule: same nodes as reverse ExecOrder, grouped by TypeId.
+	// This is used by CPU node cull propagation to traverse reverse topo order in batches.
+	Compiled.ReverseDispatchSchedule.Reset();
+	Compiled.ReverseDispatchSchedule.Reserve(Compiled.DispatchSchedule.Num());
+	for (int32 BatchIdx = Compiled.DispatchSchedule.Num() - 1; BatchIdx >= 0; --BatchIdx)
+	{
+		const FGIAG_AnimDispatchBatch& B = Compiled.DispatchSchedule[BatchIdx];
+		FGIAG_AnimDispatchBatch RB;
+		RB.TypeId = B.TypeId;
+		RB.NodeIndices = B.NodeIndices;
+		Algo::Reverse(RB.NodeIndices); // reverse within the batch for reverse topo traversal
+		Compiled.ReverseDispatchSchedule.Add(MoveTemp(RB));
+	}
+
+	// Precompute CPU cull helper tables (no per-frame scans/allocations).
+	Compiled.NumInputPinsByNode.SetNumUninitialized(Compiled.NumNodes);
+	for (int32 NodeIdx = 0; NodeIdx < Compiled.NumNodes; ++NodeIdx)
+	{
+		const int32 NumPins = Compiled.Nodes[NodeIdx].NumInputPins;
+		check(NumPins >= 0 && NumPins <= 0xFFFF);
+		Compiled.NumInputPinsByNode[NodeIdx] = (uint16)NumPins;
+	}
+
+	Compiled.CullIndexByNode.SetNumUninitialized(Compiled.NumNodes);
+	for (int32 i = 0; i < Compiled.CullIndexByNode.Num(); ++i) { Compiled.CullIndexByNode[i] = INDEX_NONE; }
+	Compiled.CullDispatchSchedule.Reset();
+	Compiled.NumCullNodes = 0;
+	Compiled.CullDispatchSchedule.Reserve(Compiled.DispatchSchedule.Num());
+	for (const FGIAG_AnimDispatchBatch& Batch : Compiled.DispatchSchedule)
+	{
+		if (Batch.NodeIndices.Num() == 0)
+		{
+			continue;
+		}
+		const int32 FirstNodeIdx = Batch.NodeIndices[0];
+		const IGIAG_AnimNodeMeta* Meta = Compiled.Nodes[FirstNodeIdx].NodeMeta;
+		check(Meta != nullptr);
+		if (!Meta->HasCullLogic())
+		{
+			continue;
+		}
+
+		Compiled.CullDispatchSchedule.Add(Batch);
+		for (const int32 NodeIdx : Batch.NodeIndices)
+		{
+			check(NodeIdx >= 0 && NodeIdx < Compiled.NumNodes);
+			Compiled.CullIndexByNode[NodeIdx] = Compiled.NumCullNodes++;
 		}
 	}
 

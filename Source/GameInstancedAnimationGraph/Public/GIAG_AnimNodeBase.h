@@ -310,6 +310,42 @@ struct FGIAG_AnimNodeCpuDispatchContext
 	}
 };
 
+/**
+ * CPU cull dispatch context: provides typed access to per-slot node instance data for cull prepass.
+ * Used to batch-compute input need-masks for a set of nodes of the same type.
+ */
+struct FGIAG_AnimNodeCpuCullContext
+{
+	int32 NumInstances = 0;  // active count
+	int32 SlotCapacity = 0;
+
+	/** ActiveIndex -> SlotIndex mapping (slot-indexed buffers). Size == NumInstances. */
+	TConstArrayView<uint32> ActiveInstanceIndices;
+
+	/** Per-node pin counts (NodeIndex -> NumInputPins). Size == NumNodes. */
+	TConstArrayView<uint16> NumInputsByNode;
+
+	/** Per-node AoS instance storage: NodeData[NodeIdx] points to SlotCapacity*StrideBytes bytes. */
+	TConstArrayView<const uint8*> NodeData;
+	TConstArrayView<uint32> NodeStrideBytes;
+
+	FORCEINLINE const uint8* GetNodePtrBySlotRaw(int32 NodeIdx, int32 SlotIndex) const
+	{
+		check(NumInputsByNode.Num() > 0);
+		check(NodeData.IsValidIndex(NodeIdx));
+		check(NodeStrideBytes.IsValidIndex(NodeIdx));
+		check(SlotIndex >= 0 && SlotIndex < SlotCapacity);
+		check(NodeData[NodeIdx] != nullptr);
+		return NodeData[NodeIdx] + (int64)NodeStrideBytes[NodeIdx] * (int64)SlotIndex;
+	}
+
+	template<typename T>
+	FORCEINLINE const T* GetNodePtrBySlot(int32 NodeIdx, int32 SlotIndex) const
+	{
+		return reinterpret_cast<const T*>(GetNodePtrBySlotRaw(NodeIdx, SlotIndex));
+	}
+};
+
 USTRUCT(BlueprintType, BlueprintInternalUseOnly)
 struct FGIAG_AnimNodeRef
 {
@@ -349,20 +385,25 @@ struct GAMEINSTANCEDANIMATIONGRAPH_API IGIAG_AnimNodeMeta : FNoncopyable
 	/** Optional: whether this node type participates in culling. */
 	virtual bool HasCullLogic() const = 0;
 
-	/** Optional: Node-cull input need-mask (CPU): bit i => input pin i is needed. */
-	virtual uint32 ComputeCullNeedMaskCPU(uint32 NumInputs, const void* NodeData) const = 0;
-
 	/**
 	 * Optional: emit HLSL function body that computes an input need-mask for this node.
 	 *
 	 * Contract:
-	 * - Called only when HasCullLogic() is true.
 	 * - Must write the full function body (including `return ...;`).
 	 * - Must provide cull param metadata:
 	 *   - OutHlslElementType: element type of StructuredBuffer NodeData (e.g. "float")
 	 *   - OutMemberName: suffix for symbol generation (e.g. "Alpha" => Foo_Alpha_Params)
 	 */
 	virtual void EmitCullNeedMaskHlslBody(FString& Out, const TCHAR*& OutHlslElementType, const TCHAR*& OutMemberName) const = 0;
+
+	/**
+	 * Optional: batch compute per-slot input need-masks for a set of nodes of this type.
+	 *
+	 * Output layout:
+	 * - OutNeedMasks[(NodeInBatch * Context.NumInstances) + ActiveIndex] = NeedMask
+	 * - NeedMask bit i => input pin i is needed
+	 */
+	virtual void ComputeCullNeedMasksCPU(const FGIAG_AnimNodeCpuCullContext& Context, TConstArrayView<int32> NodeIndices, TArrayView<uint32> OutNeedMasks) const = 0;
 
 	virtual int32 GetNumInputPins() const = 0;
 	virtual int32 GetNumOutputPins() const = 0;
@@ -542,23 +583,6 @@ struct TGIAG_AnimNodeMeta : IGIAG_AnimNodeMeta
 		return bHasCpuCull && bHasHlslCull;
 	}
 
-	uint32 ComputeCullNeedMaskCPU(uint32 NumInputs, const void* NodeData) const override
-	{
-		check(NodeData != nullptr);
-		if constexpr (requires(const T& Self, uint32 N)
-		{
-			Self.ComputeCullNeedMaskCPU(N);
-		})
-		{
-			return (uint32)((const T*)NodeData)->ComputeCullNeedMaskCPU(NumInputs);
-		}
-		else
-		{
-			checkNoEntry();
-			return 0u;
-		}
-	}
-
 	void EmitCullNeedMaskHlslBody(FString& Out, const TCHAR*& OutHlslElementType, const TCHAR*& OutMemberName) const override
 	{
 		if constexpr (requires { T::EmitCullNeedMaskHlslBody(Out, OutHlslElementType, OutMemberName); })
@@ -567,6 +591,48 @@ struct TGIAG_AnimNodeMeta : IGIAG_AnimNodeMeta
 		}
 		else
 		{
+			checkNoEntry();
+		}
+	}
+
+	void ComputeCullNeedMasksCPU(const FGIAG_AnimNodeCpuCullContext& Context, TConstArrayView<int32> NodeIndices, TArrayView<uint32> OutNeedMasks) const override
+	{
+		// Optional fast path for node authors (e.g. ISPC): provide a static batch kernel.
+		if constexpr (requires(const FGIAG_AnimNodeCpuCullContext& Ctx, TConstArrayView<int32> Nodes, TArrayView<uint32> Out)
+		{
+			T::ComputeCullNeedMasksCPU(Ctx, Nodes, Out);
+		})
+		{
+			T::ComputeCullNeedMasksCPU(Context, NodeIndices, OutNeedMasks);
+			return;
+		}
+		else if constexpr (requires(const T& Self, uint32 N) { Self.ComputeCullNeedMaskCPU(N); })
+		{
+			check(Context.NumInstances > 0);
+			check(Context.ActiveInstanceIndices.Num() == Context.NumInstances);
+			check(OutNeedMasks.Num() == NodeIndices.Num() * Context.NumInstances);
+
+			// Default: loop nodes x active instances, reading node state and calling the strong-typed member function.
+			for (int32 NodeInBatch = 0; NodeInBatch < NodeIndices.Num(); ++NodeInBatch)
+			{
+				const int32 NodeIdx = NodeIndices[NodeInBatch];
+				check(NodeIdx >= 0 && Context.NumInputsByNode.IsValidIndex(NodeIdx));
+				const uint32 NumInputs = (uint32)Context.NumInputsByNode[NodeIdx];
+
+				for (int32 ActiveIndex = 0; ActiveIndex < Context.NumInstances; ++ActiveIndex)
+				{
+					const int32 SlotIndex = (int32)Context.ActiveInstanceIndices[ActiveIndex];
+					check(SlotIndex >= 0 && SlotIndex < Context.SlotCapacity);
+
+					const T* NodePtr = Context.GetNodePtrBySlot<T>(NodeIdx, SlotIndex);
+					const uint32 NeedMask = (uint32)NodePtr->ComputeCullNeedMaskCPU(NumInputs);
+					OutNeedMasks[(NodeInBatch * Context.NumInstances) + ActiveIndex] = NeedMask;
+				}
+			}
+		}
+		else
+		{
+			// Not a cull-capable node type.
 			checkNoEntry();
 		}
 	}
