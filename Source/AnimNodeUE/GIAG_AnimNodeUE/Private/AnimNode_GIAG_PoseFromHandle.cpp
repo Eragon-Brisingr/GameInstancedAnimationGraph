@@ -28,6 +28,16 @@ namespace
 void FAnimNode_GIAG_PoseFromHandle::Initialize_AnyThread(const FAnimationInitializeContext& Context)
 {
 	FAnimNode_Base::Initialize_AnyThread(Context);
+	
+	auto AnimInstanceObj = Context.AnimInstanceProxy->GetAnimInstanceObject();
+	if (ensure(AnimInstanceObj))
+	{
+		auto World = AnimInstanceObj->GetWorld();
+		if (ensure(World))
+		{
+			Subsystem = World->GetSubsystem<UGameInstancedAnimationGraphSubsystem>();
+		}
+	}
 }
 
 void FAnimNode_GIAG_PoseFromHandle::CacheBones_AnyThread(const FAnimationCacheBonesContext& Context)
@@ -46,7 +56,6 @@ void FAnimNode_GIAG_PoseFromHandle::Evaluate_AnyThread(FPoseContext& Output)
 {
 	Output.ResetToRefPose();
 
-	const UGameInstancedAnimationGraphSubsystem* Subsystem = Handle.InstancedAnimSubsystem.Get();
 	if (!Subsystem || Handle.RecordIndex == INDEX_NONE)
 	{
 		return;

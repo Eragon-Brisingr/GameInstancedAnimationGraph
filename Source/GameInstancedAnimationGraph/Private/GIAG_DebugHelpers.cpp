@@ -4,14 +4,14 @@
 #include "GameInstancedAnimationGraphSubsystem.h"
 #include "Engine/World.h"
 
-void UGIAG_DebugHelpers::DrawDebugSkeletonFromLocalPoseTRS(const FTransform& ComponentToWorld, const FGameInstancedAnimationGraphHandle& Handle, const TArray<FTransform3f>& LocalPoseTRS, FLinearColor Color, float Duration, float Thickness)
+void UGIAG_DebugHelpers::DrawDebugSkeletonFromLocalPoseTRS(const UObject* WorldContextObject, const FTransform& ComponentToWorld, const FGameInstancedAnimationGraphHandle& Handle, const TArray<FTransform3f>& LocalPoseTRS, FLinearColor Color, float Duration, float Thickness)
 {
 	if (!Handle)
 	{
 		return;
 	}
 	
-	UGameInstancedAnimationGraphSubsystem* Subsystem = Handle.InstancedAnimSubsystem;
+	UGameInstancedAnimationGraphSubsystem* Subsystem = WorldContextObject->GetWorld()->GetSubsystem<UGameInstancedAnimationGraphSubsystem>();
 	check(Subsystem);
 	
 	UWorld* World = Subsystem->GetWorld();

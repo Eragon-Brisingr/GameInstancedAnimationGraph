@@ -17,6 +17,9 @@ struct GIAG_ANIMNODEUE_API FAnimNode_GIAG_PoseFromHandle : public FAnimNode_Base
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="GIAG", meta=(PinShownByDefault))
 	FGameInstancedAnimationGraphHandle Handle;
+	
+	UPROPERTY(Transient)
+	TObjectPtr<UGameInstancedAnimationGraphSubsystem> Subsystem;
 
 	// FAnimNode_Base
 	void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;

@@ -1406,13 +1406,11 @@ UGameInstancedAnimationGraphSubsystem::FInstancedAnimRecord* UGameInstancedAnima
 	{
 		return nullptr;
 	}
-	check(Handle.InstancedAnimSubsystem == this);
 	return &AnimRecords[Handle.RecordIndex];
 }
 
 void UGameInstancedAnimationGraphSubsystem::InvalidateHandle(FGameInstancedAnimationGraphHandle& Handle)
 {
-	Handle.InstancedAnimSubsystem = nullptr;
 	Handle.RecordIndex = INDEX_NONE;
 	Handle.SerialNumber = INDEX_NONE;
 }
@@ -1654,7 +1652,6 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddIns
 	int32& Serial = AnimRecordSerials[RecordIndex];
 	// Avoid INDEX_NONE (UE uses -1); keep serial positive.
 	Serial = FMath::Max(1, Serial + 1);
-	Handle.InstancedAnimSubsystem = this;
 	Handle.RecordIndex = RecordIndex;
 	Handle.SerialNumber = Serial;
 
@@ -2627,11 +2624,7 @@ void UGameInstancedAnimationGraphSubsystem::TickCpuAttachSync_GameThread()
 		checkf(Rec.SlotIndex >= 0 && Rec.SlotIndex < Shard.SlotCapacity, TEXT("GIAG AttachSync: invalid SlotIndex=%d."), Rec.SlotIndex);
 
 		// Use the CPU pose cache produced earlier in the frame.
-		FGameInstancedAnimationGraphHandle Handle;
-		Handle.InstancedAnimSubsystem = this;
-		Handle.RecordIndex = RecordIndex;
-		Handle.SerialNumber = AnimRecordSerials[RecordIndex];
-
+		const FGameInstancedAnimationGraphHandle Handle{ RecordIndex, AnimRecordSerials[RecordIndex] };
 		uint64 Frame = 0;
 		TConstArrayView<FTransform3f> LocalPose;
 		if (!TryGetCpuPoseCache_NoLock(Handle, Frame, LocalPose))
@@ -2855,10 +2848,7 @@ void UGameInstancedAnimationGraphSubsystem::RemoveInstance(FGameInstancedAnimati
 				{
 					continue;
 				}
-				FGameInstancedAnimationGraphHandle FollowHandle;
-				FollowHandle.InstancedAnimSubsystem = this;
-				FollowHandle.RecordIndex = FollowIndex;
-				FollowHandle.SerialNumber = AnimRecordSerials[FollowIndex];
+				FGameInstancedAnimationGraphHandle FollowHandle{ FollowIndex, AnimRecordSerials[FollowIndex] };
 				RemoveInstance(FollowHandle);
 			}
 		}
@@ -2979,10 +2969,7 @@ void UGameInstancedAnimationGraphSubsystem::RemoveInstance(FGameInstancedAnimati
 			{
 				continue;
 			}
-			FGameInstancedAnimationGraphHandle FollowHandle;
-			FollowHandle.InstancedAnimSubsystem = this;
-			FollowHandle.RecordIndex = FollowIndex;
-			FollowHandle.SerialNumber = AnimRecordSerials[FollowIndex];
+			FGameInstancedAnimationGraphHandle FollowHandle{ FollowIndex, AnimRecordSerials[FollowIndex] };
 			RemoveInstance(FollowHandle);
 		}
 	}
@@ -3054,7 +3041,14 @@ void UGameInstancedAnimationGraphSubsystem::SetInstanceTransform(const FGameInst
 	}
 
 	// Follow transform is driven by master.
-	if (Rec->MasterRecordIndex != INDEX_NONE)
+	if (!ensure(Rec->MasterRecordIndex == INDEX_NONE))
+	{
+		return;
+	}
+
+	FMeshBucket& Bucket = Buckets[Rec->BucketIndex];
+	FSkinnedShard& Shard = Bucket.Shards[Rec->ShardIndex];
+	if (FMemory::Memcmp(&Shard.TransformBySlot[Rec->SlotIndex], &NewTransform, sizeof(FTransform)) == 0)
 	{
 		return;
 	}
@@ -3069,11 +3063,6 @@ void UGameInstancedAnimationGraphSubsystem::SetInstanceTransform(const FGameInst
 			bTeleport ? ETeleportType::TeleportPhysics : ETeleportType::None);
 
 		// Keep shard slot transform in sync for culling and backend switching.
-		checkf(Buckets.IsValidIndex(Rec->BucketIndex), TEXT("GIAG CPU: invalid BucketIndex=%d."), Rec->BucketIndex);
-		FMeshBucket& Bucket = Buckets[Rec->BucketIndex];
-		check(Bucket.Shards.IsValidIndex(Rec->ShardIndex));
-		FSkinnedShard& Shard = Bucket.Shards[Rec->ShardIndex];
-		checkf(Rec->SlotIndex >= 0 && Rec->SlotIndex < Shard.SlotCapacity, TEXT("GIAG CPU: invalid SlotIndex=%d."), Rec->SlotIndex);
 		Shard.TransformBySlot[Rec->SlotIndex] = NewTransform;
 		Shard.TransformDirty[Rec->SlotIndex] = true;
 		return;
@@ -3084,11 +3073,6 @@ void UGameInstancedAnimationGraphSubsystem::SetInstanceTransform(const FGameInst
 	{
 		FPrivateUtils::UpdateISKMCInstanceTransformById(*Rec->ISKMC, Rec->InstanceId, NewTransform, true);
 
-		checkf(Buckets.IsValidIndex(Rec->BucketIndex), TEXT("GIAG: invalid BucketIndex=%d."), Rec->BucketIndex);
-		FMeshBucket& Bucket = Buckets[Rec->BucketIndex];
-		checkf(Bucket.Shards.IsValidIndex(Rec->ShardIndex),
-			TEXT("GIAG: invalid ShardIndex=%d (BucketIndex=%d)."), Rec->ShardIndex, Rec->BucketIndex);
-		FSkinnedShard& Shard = Bucket.Shards[Rec->ShardIndex];
 		checkf(Rec->SlotIndex >= 0 && Rec->SlotIndex < Shard.SlotCapacity, TEXT("GIAG: invalid SlotIndex=%d."), Rec->SlotIndex);
 
 		Shard.TransformBySlot[Rec->SlotIndex] = NewTransform;
@@ -3430,7 +3414,6 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddFol
 		check(MasterRec);
 		MasterRec->FollowRecordIndices.Add(RecordIndex);
 
-		Handle.InstancedAnimSubsystem = this;
 		Handle.RecordIndex = RecordIndex;
 		Handle.SerialNumber = Serial;
 		return Handle;
@@ -3593,7 +3576,6 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddFol
 		MasterRec->FollowRecordIndices.Add(RecordIndex);
 	}
 
-	Handle.InstancedAnimSubsystem = this;
 	Handle.RecordIndex = RecordIndex;
 	Handle.SerialNumber = Serial;
 	return Handle;

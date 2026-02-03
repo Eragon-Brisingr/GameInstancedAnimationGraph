@@ -14,15 +14,12 @@ struct GAMEINSTANCEDANIMATIONGRAPH_API FGameInstancedAnimationGraphHandle
 	GENERATED_BODY()
 public:
 	UPROPERTY(Transient)
-	TObjectPtr<UGameInstancedAnimationGraphSubsystem> InstancedAnimSubsystem = nullptr;
-	
-	UPROPERTY(Transient)
 	int32 RecordIndex = INDEX_NONE;
 	
 	UPROPERTY(Transient)
 	int32 SerialNumber = INDEX_NONE;
-	
-	bool IsValid() const;
+
+	FORCEINLINE bool IsValid() const { return RecordIndex != INDEX_NONE; }
 	explicit operator bool() const { return IsValid(); }
 };
 

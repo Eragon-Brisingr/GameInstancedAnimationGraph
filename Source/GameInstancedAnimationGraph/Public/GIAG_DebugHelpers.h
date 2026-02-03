@@ -18,7 +18,7 @@ public:
 	 * Draw skeleton as parent-child line segments using a LocalPoseTRS readback.
 	 * ParentIndices are resolved from subsystem via Handle.
 	 */
-	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|Debug")
-	static void DrawDebugSkeletonFromLocalPoseTRS(const FTransform& ComponentToWorld, const FGameInstancedAnimationGraphHandle& Handle, const TArray<FTransform3f>& LocalPoseTRS, FLinearColor Color = FLinearColor::Green, float Duration = 0.f, float Thickness = 0.f);
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|Debug", meta = (WorldContext = WorldContextObject))
+	static void DrawDebugSkeletonFromLocalPoseTRS(const UObject* WorldContextObject, const FTransform& ComponentToWorld, const FGameInstancedAnimationGraphHandle& Handle, const TArray<FTransform3f>& LocalPoseTRS, FLinearColor Color = FLinearColor::Green, float Duration = 0.f, float Thickness = 0.f);
 };
 
