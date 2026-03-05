@@ -183,9 +183,10 @@ public:
 
 	// UObject overrides for cooked shader caching (GraphCull per-graph ShaderMap).
 #if WITH_EDITOR
-	virtual void BeginCacheForCookedPlatformData(const ITargetPlatform* TargetPlatform) override;
-	virtual void ClearCachedCookedPlatformData(const ITargetPlatform* TargetPlatform) override;
-	virtual bool IsCachedCookedPlatformDataLoaded(const ITargetPlatform* TargetPlatform) override;
+	void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	void BeginCacheForCookedPlatformData(const ITargetPlatform* TargetPlatform) override;
+	void ClearCachedCookedPlatformData(const ITargetPlatform* TargetPlatform) override;
+	bool IsCachedCookedPlatformDataLoaded(const ITargetPlatform* TargetPlatform) override;
 #endif // WITH_EDITOR
 	virtual void Serialize(FArchive& Ar) override;
 protected:

@@ -724,6 +724,14 @@ const FGIAG_AnimGraphCompiledData& UGIAG_AnimGraph::Compile()
 }
 
 #if WITH_EDITOR
+void UGIAG_AnimGraph::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+	
+	bCompiled = false;
+	Compiled = {};
+}
+
 void UGIAG_AnimGraph::BeginCacheForCookedPlatformData(const ITargetPlatform* TargetPlatform)
 {
 	Super::BeginCacheForCookedPlatformData(TargetPlatform);

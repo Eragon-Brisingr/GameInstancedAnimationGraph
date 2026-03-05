@@ -1,0 +1,170 @@
+// LookAt (Base -> Out) with runtime enable/disable blending.
+// - Static settings are passed as constants: LookAtAxisLocal/LookAtClampDegrees/BlendDurationSeconds.
+// - Runtime params are per-slot: TargetLocationWS/bEnabled/LastEnableDisableTimeSeconds.
+
+#include "/Engine/Public/Platform.ush"
+#include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
+
+struct FGIAG_LookAtRuntimeData
+{
+	float3 TargetLocationWS;
+	float LastEnableDisableTimeSeconds;
+	uint bEnabled;
+	float3 Padding;
+};
+
+uint NumBones;
+uint NumInstances;
+float CurrentTimeSeconds;
+float BlendDurationSeconds;
+float3 LookAtAxisLocal;
+float LookAtClampDegrees;
+uint DispatchGroupCountX;
+uint DispatchGroupCountY;
+uint DispatchGroupOffset;
+
+StructuredBuffer<FGIAG_BoneTRS> BasePose;
+StructuredBuffer<FGIAG_LookAtRuntimeData> NodeParams;
+StructuredBuffer<int> ParentIndices;
+StructuredBuffer<int> BoneIndexBuffer;
+StructuredBuffer<FGIAG_Transform> WorldToComponentBySlot;
+StructuredBuffer<uint> ActiveInstanceIndices; // ActiveIndex -> SlotIndex
+StructuredBuffer<uint> NeedNodeBits;
+uint NeedNodeWordsPerSlot;
+uint NodeIndex;
+RWStructuredBuffer<FGIAG_BoneTRS> RW_OutPose;
+
+float GIAG_ComputeEnableAlpha(FGIAG_LookAtRuntimeData RuntimeData)
+{
+	if (BlendDurationSeconds <= 0.0)
+	{
+		return RuntimeData.bEnabled != 0u ? 1.0 : 0.0;
+	}
+	float T = saturate((CurrentTimeSeconds - RuntimeData.LastEnableDisableTimeSeconds) / BlendDurationSeconds);
+	return RuntimeData.bEnabled != 0u ? T : (1.0 - T);
+}
+
+float3 GIAG_TransformPoint(FGIAG_Transform Transform, float3 Point)
+{
+	return GIAG_QuatRotateVector(Transform.Rotation, Transform.Scale3D * Point) + Transform.Translation;
+}
+
+FGIAG_BoneTRS GIAG_ComputeComponentTransformForBone(uint SlotIndex, uint BoneIndex)
+{
+	FGIAG_BoneTRS ComponentBone = BasePose[SlotIndex * NumBones + BoneIndex];
+	int Parent = ParentIndices[BoneIndex];
+	while (Parent >= 0)
+	{
+		ComponentBone = GIAG_MultiplyBoneTRS(ComponentBone, BasePose[SlotIndex * NumBones + (uint)Parent]);
+		Parent = ParentIndices[(uint)Parent];
+	}
+	return ComponentBone;
+}
+
+FQuat GIAG_FindBetweenNormals(float3 A, float3 B)
+{
+	float DotAB = dot(A, B);
+	float3 CrossAB = cross(A, B);
+	float W = 1.0 + DotAB;
+	if (W < 1e-6)
+	{
+		// 180-degree case: pick any orthogonal axis.
+		float3 Axis = abs(A.x) > abs(A.z) ? float3(-A.y, A.x, 0.0) : float3(0.0, -A.z, A.y);
+		Axis = normalize(Axis);
+		return float4(Axis, 0.0);
+	}
+	return GIAG_NormalizeQuat(float4(CrossAB, W));
+}
+
+float3 GIAG_ClampLookDirection(float3 AimVector, float3 ToTarget)
+{
+	if (LookAtClampDegrees > 0.0)
+	{
+		float ClampRadians = radians(min(LookAtClampDegrees, 180.0));
+		float DotVal = clamp(dot(AimVector, ToTarget), -1.0, 1.0);
+		float DiffAngle = acos(DotVal);
+		if (DiffAngle > ClampRadians)
+		{
+			float3 DeltaTarget = ToTarget - AimVector;
+			DeltaTarget *= (ClampRadians / DiffAngle);
+			ToTarget = normalize(AimVector + DeltaTarget);
+		}
+	}
+	return ToTarget;
+}
+
+[numthreads(THREADS_X, THREADS_Y, THREADS_Z)]
+void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	uint GroupLinear =
+		DispatchGroupOffset +
+		GroupId.x +
+		GroupId.y * DispatchGroupCountX +
+		GroupId.z * (DispatchGroupCountX * DispatchGroupCountY);
+	uint DispatchId = GroupLinear * (THREADS_X * THREADS_Y * THREADS_Z) + GroupIndex;
+	uint Total = NumBones * NumInstances;
+	if (DispatchId >= Total)
+	{
+		return;
+	}
+
+	uint ActiveIndex = DispatchId / NumBones;
+	uint BoneIndex = DispatchId - ActiveIndex * NumBones;
+
+	uint SlotIndex = ActiveInstanceIndices[ActiveIndex];
+	if (NeedNodeWordsPerSlot != 0u && !GIAG_IsNodeNeeded(NeedNodeBits, NeedNodeWordsPerSlot, NodeIndex, SlotIndex))
+	{
+		return;
+	}
+
+	uint OutIndex = SlotIndex * NumBones + BoneIndex;
+	RW_OutPose[OutIndex] = BasePose[OutIndex];
+
+	const uint BoneToModify = (uint)BoneIndexBuffer[0];
+	if (BoneIndex != BoneToModify)
+	{
+		return;
+	}
+
+	FGIAG_LookAtRuntimeData RuntimeData = NodeParams[SlotIndex];
+	const float Alpha = GIAG_ComputeEnableAlpha(RuntimeData);
+	if (Alpha <= 0.0)
+	{
+		return;
+	}
+
+	FGIAG_BoneTRS BoneCS = GIAG_ComputeComponentTransformForBone(SlotIndex, BoneToModify);
+	float3 TargetCS = GIAG_TransformPoint(WorldToComponentBySlot[SlotIndex], RuntimeData.TargetLocationWS);
+	float3 AimVectorCS = normalize(GIAG_QuatRotateVector(BoneCS.Rotation, LookAtAxisLocal));
+	float3 ToTarget = normalize(TargetCS - BoneCS.Translation);
+	ToTarget = GIAG_ClampLookDirection(AimVectorCS, ToTarget);
+
+	FQuat DeltaCS = GIAG_FindBetweenNormals(AimVectorCS, ToTarget);
+	if (DeltaCS.w < 0.0)
+	{
+		DeltaCS *= -1.0;
+	}
+	float OneMinus = 1.0 - Alpha;
+	FQuat BlendedDelta = float4(
+		DeltaCS.x * Alpha,
+		DeltaCS.y * Alpha,
+		DeltaCS.z * Alpha,
+		DeltaCS.w * Alpha + OneMinus);
+	BlendedDelta = GIAG_NormalizeQuat(BlendedDelta);
+
+	FQuat NewBoneCSRot = GIAG_QuatMultiply(BlendedDelta, BoneCS.Rotation);
+
+	int ParentBone = ParentIndices[BoneToModify];
+	FQuat ParentCSRot = float4(0.0, 0.0, 0.0, 1.0);
+	if (ParentBone >= 0)
+	{
+		ParentCSRot = GIAG_ComputeComponentTransformForBone(SlotIndex, (uint)ParentBone).Rotation;
+	}
+	FQuat ParentInv = float4(-ParentCSRot.x, -ParentCSRot.y, -ParentCSRot.z, ParentCSRot.w);
+	FQuat NewLocalRot = GIAG_QuatMultiply(ParentInv, NewBoneCSRot);
+	NewLocalRot = GIAG_NormalizeQuat(NewLocalRot);
+
+	FGIAG_BoneTRS OutBone = RW_OutPose[OutIndex];
+	OutBone.Rotation = NewLocalRot;
+	RW_OutPose[OutIndex] = OutBone;
+}
