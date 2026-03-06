@@ -28,6 +28,18 @@ public:
 		Num,
 	};
 
+	static EGIAG_AnimPinType GetInputPinType(int32 PinIndex)
+	{
+		check(PinIndex == (int32)EInputPin::Base || PinIndex == (int32)EInputPin::Additive);
+		return EGIAG_AnimPinType::LocalPose;
+	}
+
+	static EGIAG_AnimPinType GetOutputPinType(int32 PinIndex)
+	{
+		check(PinIndex == (int32)EOutputPin::Out);
+		return EGIAG_AnimPinType::LocalPose;
+	}
+
 	void SetAlpha(const FGIAG_AnimNodeRef& NodeRef, float NewAlpha)
 	{
 		if (Alpha == NewAlpha)

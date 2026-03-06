@@ -43,9 +43,8 @@ namespace GIAG
 		/** Optional ActiveIndex->SlotIndex mapping. */
 		FRDGBufferSRVRef ActiveInstanceIndices = nullptr; // StructuredBuffer<uint>
 
-		FRDGBufferSRVRef ParentIndices = nullptr;      // StructuredBuffer<int>
 		FRDGBufferSRVRef InverseRefPoseTRS = nullptr;  // StructuredBuffer<FGIAG_BoneTRS>
-		FRDGBufferSRVRef LocalPoseTRS = nullptr;       // StructuredBuffer<FGIAG_BoneTRS>
+		FRDGBufferSRVRef PoseTRS = nullptr;            // StructuredBuffer<FGIAG_BoneTRS>
 
 		/** UE SkinningSceneExtension TransformBuffer (ByteAddress). */
 		FRDGBufferRef TransformBuffer = nullptr;
@@ -64,6 +63,21 @@ namespace GIAG
 	};
 
 	GAMEINSTANCEDANIMATIONGRAPHSHADER_API void AddPoseToTransformBufferPasses(FRDGBuilder& GraphBuilder, const FPoseToTransformBufferPassParams& Params);
+
+	struct FPoseSpaceConvertPassParams
+	{
+		uint32 NumBones = 0;
+		uint32 NumInstances = 0;
+		/** 0: LocalPose, 1: ComponentPose. */
+		uint32 SourcePoseType = 0;
+		/** 0: LocalPose, 1: ComponentPose. */
+		uint32 DestinationPoseType = 0;
+		FRDGBufferSRVRef ActiveInstanceIndices = nullptr; // StructuredBuffer<uint>
+		FRDGBufferSRVRef ParentIndices = nullptr;         // StructuredBuffer<int>
+		FRDGBufferSRVRef SourcePoseTRS = nullptr;         // StructuredBuffer<FGIAG_BoneTRS>
+		FRDGBufferUAVRef RW_DestinationPoseTRS = nullptr; // RWStructuredBuffer<FGIAG_BoneTRS>
+	};
+	GAMEINSTANCEDANIMATIONGRAPHSHADER_API void AddPoseSpaceConvertPasses(FRDGBuilder& GraphBuilder, const FPoseSpaceConvertPassParams& Params);
 
 	struct FTransformBufferFollowPassParams
 	{
@@ -110,8 +124,7 @@ namespace GIAG
 		uint32 NumBones = 0;
 		uint32 NumAttachments = 0;
 
-		FRDGBufferSRVRef ParentIndices = nullptr;           // StructuredBuffer<int>
-		FRDGBufferSRVRef LocalPoseTRS = nullptr;            // StructuredBuffer<FGIAG_BoneTRS>
+		FRDGBufferSRVRef PoseTRS = nullptr;                 // StructuredBuffer<FGIAG_BoneTRS>
 		FRDGBufferSRVRef ComponentToWorldBySlot = nullptr;  // StructuredBuffer<FGIAG_Transform>
 		FRDGBufferSRVRef AttachDescs = nullptr;             // StructuredBuffer<FGIAG_AttachDescPacked>
 
@@ -130,8 +143,7 @@ namespace GIAG
 		uint32 NumBones = 0;
 		uint32 NumAttachments = 0;
 
-		FRDGBufferSRVRef ParentIndices = nullptr;           // StructuredBuffer<int>
-		FRDGBufferSRVRef LocalPoseTRS = nullptr;            // StructuredBuffer<FGIAG_BoneTRS>
+		FRDGBufferSRVRef PoseTRS = nullptr;                 // StructuredBuffer<FGIAG_BoneTRS>
 		FRDGBufferSRVRef ComponentToWorldBySlot = nullptr;  // StructuredBuffer<FGIAG_Transform>
 		FRDGBufferSRVRef AttachDescs = nullptr;             // StructuredBuffer<FGIAG_AttachDescPacked>
 

@@ -448,7 +448,9 @@ const FGIAG_AnimGraphCompiledData& UGIAG_AnimGraph::Compile()
 
 		const EGIAG_AnimPinType SrcType = SrcNode.NodeMeta->GetOutputPinType(Link.FromOutput.PinIndex);
 		const EGIAG_AnimPinType DstType = DstNode.NodeMeta->GetInputPinType(Link.ToInput.PinIndex);
-		checkf(SrcType == DstType, TEXT("GIAG_AnimGraph: pin type mismatch."));
+		const bool bSameType = (SrcType == DstType);
+		const bool bCrossPoseSpaceConvert = GIAG_IsPosePinType(SrcType) && GIAG_IsPosePinType(DstType);
+		checkf(bSameType || bCrossPoseSpaceConvert, TEXT("GIAG_AnimGraph: pin type mismatch (SrcType=%u DstType=%u)."), (uint32)SrcType, (uint32)DstType);
 
 		// Store input source.
 		DstNode.InputSources[Link.ToInput.PinIndex] = Link.FromOutput;
@@ -456,40 +458,122 @@ const FGIAG_AnimGraphCompiledData& UGIAG_AnimGraph::Compile()
 
 	// Allocate pose resources for pose-typed output pins. (v1: unique resource per output pose pin)
 	Compiled.NumPoseResources = 0;
+	Compiled.PoseResourceTypes.Reset();
 	for (int32 n = 0; n < Compiled.NumNodes; ++n)
 	{
 		FGIAG_AnimCompiledNode& Node = Compiled.Nodes[n];
 		for (int32 op = 0; op < Node.NumOutputPins; ++op)
 		{
-			if (Node.NodeMeta->GetOutputPinType(op) == EGIAG_AnimPinType::Pose)
+			const EGIAG_AnimPinType OutType = Node.NodeMeta->GetOutputPinType(op);
+			if (GIAG_IsPosePinType(OutType))
 			{
 				Node.OutputPoseResources[op] = Compiled.NumPoseResources++;
+				Compiled.PoseResourceTypes.Add(OutType);
 			}
 		}
 	}
 
-	// Resolve pose input resources from connected output pins.
-	for (int32 n = 0; n < Compiled.NumNodes; ++n)
+	Compiled.PoseConvertTasks.Reset();
+	TMap<TTuple<int32, uint8>, int32> ConvertTaskByKey;
+	TArray<TArray<int32>> ConvertTaskConsumers;
+	TBitArray<> ConvertTaskNeededByFinal;
+
+	auto GetOrAddPoseConvertTask = [&](int32 SrcPoseRes, EGIAG_AnimPinType SrcType, EGIAG_AnimPinType DstType) -> int32
 	{
-		FGIAG_AnimCompiledNode& Node = Compiled.Nodes[n];
-		for (int32 ip = 0; ip < Node.NumInputPins; ++ip)
+		const TTuple<int32, uint8> Key{ SrcPoseRes, (uint8)DstType };
+		if (int32* FoundTaskIndex = ConvertTaskByKey.Find(Key))
 		{
-			if (Node.NodeMeta->GetInputPinType(ip) != EGIAG_AnimPinType::Pose)
+			return *FoundTaskIndex;
+		}
+
+		FGIAG_AnimPoseConvertTask Task;
+		Task.SrcPoseResource = SrcPoseRes;
+		Task.DstPoseResource = Compiled.NumPoseResources++;
+		Task.SrcPoseType = SrcType;
+		Task.DstPoseType = DstType;
+		const int32 NewTaskIndex = Compiled.PoseConvertTasks.Add(Task);
+		Compiled.PoseResourceTypes.Add(DstType);
+		ConvertTaskByKey.Add(Key, NewTaskIndex);
+		ConvertTaskConsumers.SetNum(NewTaskIndex + 1);
+		ConvertTaskNeededByFinal.PadToNum(NewTaskIndex + 1, false);
+		return NewTaskIndex;
+	};
+
+	// Resolve pose input resources from connected output pins.
+	for (int32 NodeIdx = 0; NodeIdx < Compiled.NumNodes; ++NodeIdx)
+	{
+		FGIAG_AnimCompiledNode& Node = Compiled.Nodes[NodeIdx];
+		for (int32 InputIdx = 0; InputIdx < Node.NumInputPins; ++InputIdx)
+		{
+			const EGIAG_AnimPinType InputType = Node.NodeMeta->GetInputPinType(InputIdx);
+			if (!GIAG_IsPosePinType(InputType))
 			{
 				continue;
 			}
-			const FGIAG_AnimOutputPinRef SrcPin = Node.InputSources[ip];
+
+			const FGIAG_AnimOutputPinRef SrcPin = Node.InputSources[InputIdx];
 			if (SrcPin.NodeIndex >= 0)
 			{
 				const FGIAG_AnimCompiledNode& SrcNode = Compiled.Nodes[SrcPin.NodeIndex];
-				const int32 PoseRes = SrcNode.OutputPoseResources[SrcPin.PinIndex];
-				check(PoseRes >= 0);
-				Node.InputPoseResources[ip] = PoseRes;
+				const EGIAG_AnimPinType SrcType = SrcNode.NodeMeta->GetOutputPinType(SrcPin.PinIndex);
+				checkf(GIAG_IsPosePinType(SrcType), TEXT("GIAG_AnimGraph: source pin is not pose-typed."));
+				const int32 SrcPoseRes = SrcNode.OutputPoseResources[SrcPin.PinIndex];
+				check(SrcPoseRes >= 0);
+
+				if (SrcType == InputType)
+				{
+					Node.InputPoseResources[InputIdx] = SrcPoseRes;
+				}
+				else
+				{
+					const int32 TaskIndex = GetOrAddPoseConvertTask(SrcPoseRes, SrcType, InputType);
+					check(Compiled.PoseConvertTasks.IsValidIndex(TaskIndex));
+					Node.InputPoseResources[InputIdx] = Compiled.PoseConvertTasks[TaskIndex].DstPoseResource;
+					ConvertTaskConsumers[TaskIndex].AddUnique(NodeIdx);
+				}
 			}
 			else
 			{
-				Node.InputPoseResources[ip] = INDEX_NONE;
+				Node.InputPoseResources[InputIdx] = INDEX_NONE;
 			}
+		}
+	}
+
+	// Final pose pin (compile-time forced to ComponentPose).
+	Compiled.FinalPoseOutput = Builder.GetFinalPose();
+	Compiled.FinalPoseResource = INDEX_NONE;
+	Compiled.FinalPoseType = EGIAG_AnimPinType::LocalPose;
+	if (Compiled.FinalPoseOutput.NodeIndex >= 0)
+	{
+		check(Compiled.FinalPoseOutput.NodeIndex < Compiled.NumNodes);
+		const FGIAG_AnimCompiledNode& FinalNode = Compiled.Nodes[Compiled.FinalPoseOutput.NodeIndex];
+		checkf(
+			Compiled.FinalPoseOutput.PinIndex >= 0 && Compiled.FinalPoseOutput.PinIndex < FinalNode.NumOutputPins,
+			TEXT("GIAG_AnimGraph: invalid final pose output pin (Node=%d Pin=%d)."),
+			Compiled.FinalPoseOutput.NodeIndex,
+			Compiled.FinalPoseOutput.PinIndex);
+
+		const EGIAG_AnimPinType FinalPinType = FinalNode.NodeMeta->GetOutputPinType(Compiled.FinalPoseOutput.PinIndex);
+		checkf(GIAG_IsPosePinType(FinalPinType), TEXT("GIAG_AnimGraph: final output must be pose-typed."));
+
+		const int32 FinalPinPoseRes = FinalNode.OutputPoseResources[Compiled.FinalPoseOutput.PinIndex];
+		checkf(FinalPinPoseRes >= 0, TEXT("GIAG_AnimGraph: final output pose resource is invalid."));
+
+		if (FinalPinType == EGIAG_AnimPinType::ComponentPose)
+		{
+			Compiled.FinalPoseResource = FinalPinPoseRes;
+			Compiled.FinalPoseType = EGIAG_AnimPinType::ComponentPose;
+		}
+		else
+		{
+			const int32 ConvertTaskIndex = GetOrAddPoseConvertTask(
+				FinalPinPoseRes,
+				EGIAG_AnimPinType::LocalPose,
+				EGIAG_AnimPinType::ComponentPose);
+			check(Compiled.PoseConvertTasks.IsValidIndex(ConvertTaskIndex));
+			ConvertTaskNeededByFinal[ConvertTaskIndex] = true;
+			Compiled.FinalPoseResource = Compiled.PoseConvertTasks[ConvertTaskIndex].DstPoseResource;
+			Compiled.FinalPoseType = EGIAG_AnimPinType::ComponentPose;
 		}
 	}
 
@@ -512,37 +596,125 @@ const FGIAG_AnimGraphCompiledData& UGIAG_AnimGraph::Compile()
 
 	TopoSortOrDie(Compiled.NumNodes, OutEdges, Compiled.ExecOrder);
 
-	// Dispatch schedule: group consecutive nodes with the same TypeId.
-	Compiled.DispatchSchedule.Reset();
+	TArray<int32> ExecOrderIndexByNode;
+	ExecOrderIndexByNode.SetNumUninitialized(Compiled.NumNodes);
 	for (int32 i = 0; i < Compiled.ExecOrder.Num(); ++i)
 	{
 		const int32 NodeIdx = Compiled.ExecOrder[i];
-		const FName TypeId = Compiled.Nodes[NodeIdx].TypeId;
-		if (Compiled.DispatchSchedule.Num() == 0 || Compiled.DispatchSchedule.Last().TypeId != TypeId)
+		check(NodeIdx >= 0 && NodeIdx < Compiled.NumNodes);
+		ExecOrderIndexByNode[NodeIdx] = i;
+	}
+	for (int32 TaskIndex = 0; TaskIndex < Compiled.PoseConvertTasks.Num(); ++TaskIndex)
+	{
+		int32 FirstConsumerNodeIndex = INDEX_NONE;
+		int32 BestOrder = TNumericLimits<int32>::Max();
+		for (const int32 ConsumerNodeIndex : ConvertTaskConsumers[TaskIndex])
 		{
-			FGIAG_AnimDispatchBatch B;
-			B.TypeId = TypeId;
-			B.NodeIndices = { NodeIdx };
-			Compiled.DispatchSchedule.Add(MoveTemp(B));
+			check(ConsumerNodeIndex >= 0 && ConsumerNodeIndex < ExecOrderIndexByNode.Num());
+			const int32 Order = ExecOrderIndexByNode[ConsumerNodeIndex];
+			if (Order < BestOrder)
+			{
+				BestOrder = Order;
+				FirstConsumerNodeIndex = ConsumerNodeIndex;
+			}
+		}
+		if (FirstConsumerNodeIndex == INDEX_NONE)
+		{
+			checkf(
+				ConvertTaskNeededByFinal.IsValidIndex(TaskIndex) && ConvertTaskNeededByFinal[TaskIndex],
+				TEXT("GIAG_AnimGraph: pose conversion task has no consumer (TaskIndex=%d)."),
+				TaskIndex);
+		}
+		Compiled.PoseConvertTasks[TaskIndex].FirstConsumerNodeIndex = FirstConsumerNodeIndex;
+	}
+
+	TMap<int32, TArray<int32>> ConvertTaskIndicesByFirstConsumerNode;
+	TArray<int32> FinalOnlyConvertTaskIndices;
+	for (int32 TaskIndex = 0; TaskIndex < Compiled.PoseConvertTasks.Num(); ++TaskIndex)
+	{
+		const int32 FirstConsumer = Compiled.PoseConvertTasks[TaskIndex].FirstConsumerNodeIndex;
+		if (FirstConsumer >= 0)
+		{
+			check(FirstConsumer < Compiled.NumNodes);
+			ConvertTaskIndicesByFirstConsumerNode.FindOrAdd(FirstConsumer).Add(TaskIndex);
 		}
 		else
 		{
-			Compiled.DispatchSchedule.Last().NodeIndices.Add(NodeIdx);
+			FinalOnlyConvertTaskIndices.Add(TaskIndex);
 		}
 	}
 
+	// Dispatch schedule:
+	// - node batches are grouped by node type
+	// - pose conversion batches are inserted right before first consumer node
+	Compiled.DispatchSchedule.Reset();
+	FGIAG_AnimDispatchBatch CurrentNodeBatch;
+	CurrentNodeBatch.Kind = EGIAG_AnimDispatchBatchKind::Node;
+	auto FlushNodeBatch = [&]()
+	{
+		if (CurrentNodeBatch.NodeIndices.Num() > 0)
+		{
+			Compiled.DispatchSchedule.Add(MoveTemp(CurrentNodeBatch));
+			CurrentNodeBatch = {};
+			CurrentNodeBatch.Kind = EGIAG_AnimDispatchBatchKind::Node;
+		}
+	};
+
+	for (const int32 NodeIdx : Compiled.ExecOrder)
+	{
+		if (TArray<int32>* ConvertTaskIndices = ConvertTaskIndicesByFirstConsumerNode.Find(NodeIdx))
+		{
+			FlushNodeBatch();
+			FGIAG_AnimDispatchBatch ConvertBatch;
+			ConvertBatch.Kind = EGIAG_AnimDispatchBatchKind::PoseSpaceConvert;
+			ConvertBatch.ConvertTaskIndices = *ConvertTaskIndices;
+			Compiled.DispatchSchedule.Add(MoveTemp(ConvertBatch));
+		}
+
+		const FName TypeId = Compiled.Nodes[NodeIdx].TypeId;
+		if (CurrentNodeBatch.NodeIndices.Num() == 0)
+		{
+			CurrentNodeBatch.TypeId = TypeId;
+			CurrentNodeBatch.NodeIndices.Add(NodeIdx);
+		}
+		else if (CurrentNodeBatch.TypeId == TypeId)
+		{
+			CurrentNodeBatch.NodeIndices.Add(NodeIdx);
+		}
+		else
+		{
+			FlushNodeBatch();
+			CurrentNodeBatch.TypeId = TypeId;
+			CurrentNodeBatch.NodeIndices.Add(NodeIdx);
+		}
+	}
+	FlushNodeBatch();
+	if (FinalOnlyConvertTaskIndices.Num() > 0)
+	{
+		FGIAG_AnimDispatchBatch ConvertBatch;
+		ConvertBatch.Kind = EGIAG_AnimDispatchBatchKind::PoseSpaceConvert;
+		ConvertBatch.ConvertTaskIndices = MoveTemp(FinalOnlyConvertTaskIndices);
+		Compiled.DispatchSchedule.Add(MoveTemp(ConvertBatch));
+	}
+
 	// Reverse dispatch schedule: same nodes as reverse ExecOrder, grouped by TypeId.
+	// Convert batches are intentionally excluded (cull propagation only traverses nodes).
 	// This is used by CPU node cull propagation to traverse reverse topo order in batches.
 	Compiled.ReverseDispatchSchedule.Reset();
 	Compiled.ReverseDispatchSchedule.Reserve(Compiled.DispatchSchedule.Num());
 	for (int32 BatchIdx = Compiled.DispatchSchedule.Num() - 1; BatchIdx >= 0; --BatchIdx)
 	{
 		const FGIAG_AnimDispatchBatch& B = Compiled.DispatchSchedule[BatchIdx];
-		FGIAG_AnimDispatchBatch RB;
-		RB.TypeId = B.TypeId;
-		RB.NodeIndices = B.NodeIndices;
-		Algo::Reverse(RB.NodeIndices); // reverse within the batch for reverse topo traversal
-		Compiled.ReverseDispatchSchedule.Add(MoveTemp(RB));
+		if (B.Kind != EGIAG_AnimDispatchBatchKind::Node || B.NodeIndices.Num() == 0)
+		{
+			continue;
+		}
+		FGIAG_AnimDispatchBatch DispatchBatch;
+		DispatchBatch.Kind = EGIAG_AnimDispatchBatchKind::Node;
+		DispatchBatch.TypeId = B.TypeId;
+		DispatchBatch.NodeIndices = B.NodeIndices;
+		Algo::Reverse(DispatchBatch.NodeIndices); // reverse within the batch for reverse topo traversal
+		Compiled.ReverseDispatchSchedule.Add(MoveTemp(DispatchBatch));
 	}
 
 	// Precompute CPU cull helper tables (no per-frame scans/allocations).
@@ -561,6 +733,10 @@ const FGIAG_AnimGraphCompiledData& UGIAG_AnimGraph::Compile()
 	Compiled.CullDispatchSchedule.Reserve(Compiled.DispatchSchedule.Num());
 	for (const FGIAG_AnimDispatchBatch& Batch : Compiled.DispatchSchedule)
 	{
+		if (Batch.Kind != EGIAG_AnimDispatchBatchKind::Node)
+		{
+			continue;
+		}
 		if (Batch.NodeIndices.Num() == 0)
 		{
 			continue;
@@ -579,13 +755,6 @@ const FGIAG_AnimGraphCompiledData& UGIAG_AnimGraph::Compile()
 			check(NodeIdx >= 0 && NodeIdx < Compiled.NumNodes);
 			Compiled.CullIndexByNode[NodeIdx] = Compiled.NumCullNodes++;
 		}
-	}
-
-	// Final pose pin.
-	Compiled.FinalPoseOutput = Builder.GetFinalPose();
-	if (Compiled.FinalPoseOutput.NodeIndex >= 0)
-	{
-		check(Compiled.FinalPoseOutput.NodeIndex < Compiled.NumNodes);
 	}
 
 	// Detect whether the graph has any nodes that support cull logic.

@@ -41,6 +41,9 @@ struct FGIAG_AnimGraphCpuRunParams
 	/** Per-node AoS instance storage: NodeData[NodeIdx] points to SlotCapacity*StrideBytes bytes. */
 	TConstArrayView<const uint8*> NodeData;
 	TConstArrayView<uint32> NodeStrideBytes;
+
+	/** Requested final CPU pose space. Default to ComponentPose to avoid extra conversion when caller does not need LocalPose. */
+	EGIAG_AnimPinType RequestedFinalPoseType = EGIAG_AnimPinType::ComponentPose;
 };
 
 /**
@@ -54,7 +57,10 @@ public:
 
 	struct FOutputs
 	{
-		/** Slot-indexed final local pose (NumBones transforms per slot). */
+		/** Slot-indexed final pose (NumBones transforms per slot). Space follows FinalPoseType. */
+		FGIAG_CPUPoseBufferView FinalPose;
+		EGIAG_AnimPinType FinalPoseType = EGIAG_AnimPinType::ComponentPose;
+		/** Backward-compatible alias: set only when FinalPoseType == LocalPose. */
 		FGIAG_CPUPoseBufferView FinalLocalPose;
 	};
 
@@ -85,5 +91,10 @@ private:
 	TArray<TArray<FGIAG_BoneTRS>> PoseResources;
 	int32 PoseResourcesSlotCapacity = 0;
 	int32 PoseResourcesNumBones = 0;
+
+	// Scratch local-pose buffer used when the graph final pose is component-space.
+	TArray<FGIAG_BoneTRS> FinalLocalScratch;
+	int32 FinalLocalScratchSlotCapacity = 0;
+	int32 FinalLocalScratchNumBones = 0;
 };
 

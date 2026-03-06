@@ -1013,10 +1013,13 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 				AnimResourceCache_RT);
 
 			// ---- Attach outputs: Niagara bucket writes FxTransform; native bucket writes instance buffers ----
-			if (Outputs.FinalLocalPoseBuffer != nullptr && AttachGroupsByStateBucket_RT.Num() > 0)
+			if (Outputs.FinalPoseBuffer != nullptr && AttachGroupsByStateBucket_RT.Num() > 0)
 			{
 				const uint32 NumBonesU = (uint32)Params.NumBones;
-				FRDGBufferSRVRef LocalPoseSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(Outputs.FinalLocalPoseBuffer));
+				checkf(
+					Outputs.FinalPoseType == EGIAG_AnimPinType::ComponentPose,
+					TEXT("GIAG: Attach expects FinalPose to be ComponentPose after compile-time convergence."));
+				FRDGBufferSRVRef PoseSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(Outputs.FinalPoseBuffer));
 
 				for (auto& KV : AttachGroupsByStateBucket_RT)
 				{
@@ -1055,8 +1058,7 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 						GIAG::FAttachToISMInstanceBuffersPassParams AttachParams;
 						AttachParams.NumBones = NumBonesU;
 						AttachParams.NumAttachments = (uint32)AttachGroup.CPU.Num();
-						AttachParams.ParentIndices = Outputs.ParentIndicesSRV;
-						AttachParams.LocalPoseTRS = LocalPoseSRV;
+						AttachParams.PoseTRS = PoseSRV;
 						AttachParams.ComponentToWorldBySlot = Outputs.ComponentToWorldBySlotSRV;
 						AttachParams.AttachDescs = DescSRV;
 						AttachParams.RW_InstanceOrigin = Context.GraphBuilder.CreateUAV(InstanceOriginRDG, PF_A32B32G32R32F);
@@ -1080,8 +1082,7 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 						GIAG::FAttachToTransformBufferPassParams AttachParams;
 						AttachParams.NumBones = NumBonesU;
 						AttachParams.NumAttachments = (uint32)AttachGroup.CPU.Num();
-						AttachParams.ParentIndices = Outputs.ParentIndicesSRV;
-						AttachParams.LocalPoseTRS = LocalPoseSRV;
+						AttachParams.PoseTRS = PoseSRV;
 						AttachParams.ComponentToWorldBySlot = Outputs.ComponentToWorldBySlotSRV;
 						AttachParams.AttachDescs = DescSRV;
 						AttachParams.RW_FxTransform = OutTRSUAV;
@@ -1093,9 +1094,29 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 				}
 			}
 
-			// Debug: request LocalPose slice readbacks (FinalLocalPose is slot-indexed: SlotCapacity*NumBones FGIAG_BoneTRS).
-			if (Params.DebugLocalPoseReadbackRequests.Num() > 0 && Outputs.FinalLocalPoseBuffer != nullptr)
+			// Debug: request LocalPose slice readbacks (slot-indexed: SlotCapacity*NumBones FGIAG_BoneTRS).
+			if (Params.DebugLocalPoseReadbackRequests.Num() > 0 && Outputs.FinalPoseBuffer != nullptr)
 			{
+				checkf(
+					Outputs.FinalPoseType == EGIAG_AnimPinType::ComponentPose,
+					TEXT("GIAG: Debug LocalPose readback expects FinalPose to be ComponentPose after compile-time convergence."));
+				FRDGBufferRef ConvertedLocalPoseRDG = Context.GraphBuilder.CreateBuffer(
+					FRDGBufferDesc::CreateStructuredDesc(
+						sizeof(FGIAG_BoneTRS),
+						FMath::Max(1, Params.SlotCapacity * Params.NumBones)),
+					TEXT("GIAG_DebugFinalComponentToLocal"));
+				GIAG::FPoseSpaceConvertPassParams ConvertParams;
+				ConvertParams.NumBones = (uint32)Params.NumBones;
+				ConvertParams.NumInstances = (uint32)Params.NumInstances;
+				ConvertParams.SourcePoseType = 1u;
+				ConvertParams.DestinationPoseType = 0u;
+				ConvertParams.ActiveInstanceIndices = Outputs.ActiveInstanceIndicesSRV;
+				ConvertParams.ParentIndices = Outputs.ParentIndicesSRV;
+				ConvertParams.SourcePoseTRS = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(Outputs.FinalPoseBuffer));
+				ConvertParams.RW_DestinationPoseTRS = Context.GraphBuilder.CreateUAV(FRDGBufferUAVDesc(ConvertedLocalPoseRDG));
+				GIAG::AddPoseSpaceConvertPasses(Context.GraphBuilder, ConvertParams);
+				FRDGBufferRef LocalReadbackSource = ConvertedLocalPoseRDG;
+
 				const uint32 NumBonesU = (uint32)Params.NumBones;
 				const uint32 NumTRS = NumBonesU;
 				const uint32 NumBytes = NumTRS * (uint32)sizeof(FGIAG_BoneTRS);
@@ -1107,7 +1128,7 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 						TEXT("GIAG_DebugLocalPoseSlice"));
 
 					const uint64 SrcOffsetBytes = (uint64)Req.SlotIndex * (uint64)NumTRS * (uint64)sizeof(FGIAG_BoneTRS);
-					AddCopyBufferPass(Context.GraphBuilder, SliceRDG, 0, Outputs.FinalLocalPoseBuffer, SrcOffsetBytes, (uint64)NumBytes);
+					AddCopyBufferPass(Context.GraphBuilder, SliceRDG, 0, LocalReadbackSource, SrcOffsetBytes, (uint64)NumBytes);
 
 					TUniquePtr<FRHIGPUBufferReadback> Readback = MakeUnique<FRHIGPUBufferReadback>(TEXT("GIAG_DebugLocalPoseReadback"));
 					AddEnqueueCopyPass(Context.GraphBuilder, Readback.Get(), SliceRDG, NumBytes);

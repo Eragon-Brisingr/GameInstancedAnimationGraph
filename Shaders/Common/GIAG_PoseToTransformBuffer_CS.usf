@@ -1,5 +1,5 @@
-// LocalPose(TRS) -> UE SkinningSceneExtension TransformBuffer (RWByteAddressBuffer).
-// Same math as GIAG_PoseToSkin_CS.usf: Local(TRS)->Global(TRS) chain, then *InvRef(TRS), then TRS->matrix for skinning buffer.
+// Pose(TRS: Component) -> UE SkinningSceneExtension TransformBuffer (RWByteAddressBuffer).
+// - ComponentPose: use Component(TRS) directly as Global(TRS), then *InvRef(TRS), then TRS->matrix.
 
 #include "/Engine/Public/Platform.ush"
 #include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
@@ -11,9 +11,8 @@ uint DispatchGroupCountX;
 uint DispatchGroupCountY;
 uint DispatchGroupOffset;
 
-StructuredBuffer<int> ParentIndices;
 StructuredBuffer<FGIAG_BoneTRS> InverseRefPoseTRS; // one per bone
-StructuredBuffer<FGIAG_BoneTRS> LocalPoseTRS;      // slot-indexed, one per bone
+StructuredBuffer<FGIAG_BoneTRS> PoseTRS;      // slot-indexed, one per bone
 StructuredBuffer<uint> ActiveInstanceIndices; // ActiveIndex -> SlotIndex
 
 // Optional per-slot init flag: if non-zero, set previous=current for this frame (avoid first-frame velocity spikes).
@@ -31,9 +30,9 @@ RWByteAddressBuffer RW_TransformBuffer;
 Buffer<float4> PrevCacheFloat4;
 RWBuffer<float4> RW_PrevCacheFloat4;
 
-FGIAG_BoneTRS ReadLocalPoseTRS(in uint SlotIndex, in uint BoneIndex)
+FGIAG_BoneTRS ReadPoseTRS(in uint SlotIndex, in uint BoneIndex)
 {
-	return LocalPoseTRS[SlotIndex * NumBones + BoneIndex];
+	return PoseTRS[SlotIndex * NumBones + BoneIndex];
 }
 
 FGIAG_BoneTRS ReadInvRefPoseTRS(in uint BoneIndex)
@@ -58,15 +57,7 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 
 	uint SlotIndex = ActiveInstanceIndices[ActiveIndex];
 
-	FGIAG_BoneTRS GlobalT = ReadLocalPoseTRS(SlotIndex, BoneIndex);
-	int Parent = ParentIndices[BoneIndex];
-	int Guard = (int)NumBones + 1;
-	while (Parent >= 0 && Guard-- > 0)
-	{
-		FGIAG_BoneTRS ParentLocal = ReadLocalPoseTRS(SlotIndex, (uint)Parent);
-		GlobalT = GIAG_MultiplyBoneTRS(GlobalT, ParentLocal);
-		Parent = ParentIndices[Parent];
-	}
+	FGIAG_BoneTRS GlobalT = ReadPoseTRS(SlotIndex, BoneIndex);
 
 	FGIAG_BoneTRS InvRef = ReadInvRefPoseTRS(BoneIndex);
 	FGIAG_BoneTRS SkinT = GIAG_MultiplyBoneTRS(InvRef, GlobalT); // Global ∘ InvRef

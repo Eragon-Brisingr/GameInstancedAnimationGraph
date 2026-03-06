@@ -1,5 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+using System.IO;
 using UnrealBuildTool;
 
 public class GameInstancedAnimationGraph : ModuleRules
@@ -31,6 +32,9 @@ public class GameInstancedAnimationGraph : ModuleRules
 				
 				"GameInstancedAnimationGraphShader",
 			});
+
+		// Make shader-side shared headers available to ISPC preprocessor (for Shared/GIAG_*.ush).
+		PrivateIncludePaths.Add(Path.Combine(ModuleDirectory, "..", "..", "Shaders", "Common", "Shared"));
 
 	}
 }

@@ -31,9 +31,8 @@ namespace
 			SHADER_PARAMETER(uint32, UseInitPrevBySlot)
 			SHADER_PARAMETER(uint32, ForceInitPrevAllSlots)
 
-			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int>, ParentIndices)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_BoneTRS>, InverseRefPoseTRS)
-			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_BoneTRS>, LocalPoseTRS)
+			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_BoneTRS>, PoseTRS)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint32>, ActiveInstanceIndices)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint32>, InitPrevBySlot)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, TransformBuffer)
@@ -54,6 +53,39 @@ namespace
 	};
 
 	IMPLEMENT_GLOBAL_SHADER(FGIAG_PoseToTransformBufferCS, "/GameInstancedAnimationGraphShader/GIAG_PoseToTransformBuffer_CS.usf", "Main", SF_Compute);
+
+	class FGIAG_PoseSpaceConvertCS : public FGlobalShader
+	{
+	public:
+		DECLARE_GLOBAL_SHADER(FGIAG_PoseSpaceConvertCS);
+		SHADER_USE_PARAMETER_STRUCT(FGIAG_PoseSpaceConvertCS, FGlobalShader);
+
+		BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+			SHADER_PARAMETER(uint32, NumBones)
+			SHADER_PARAMETER(uint32, NumInstances)
+			SHADER_PARAMETER(uint32, SourcePoseType)
+			SHADER_PARAMETER(uint32, DestinationPoseType)
+			SHADER_PARAMETER(uint32, DispatchGroupCountX)
+			SHADER_PARAMETER(uint32, DispatchGroupCountY)
+			SHADER_PARAMETER(uint32, DispatchGroupOffset)
+			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint32>, ActiveInstanceIndices)
+			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int>, ParentIndices)
+			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_BoneTRS>, SourcePoseTRS)
+			SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FGIAG_BoneTRS>, RW_DestinationPoseTRS)
+		END_SHADER_PARAMETER_STRUCT()
+
+		static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters) { return true; }
+
+		static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+		{
+			FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+			OutEnvironment.SetDefine(TEXT("THREADS_X"), 64);
+			OutEnvironment.SetDefine(TEXT("THREADS_Y"), 1);
+			OutEnvironment.SetDefine(TEXT("THREADS_Z"), 1);
+		}
+	};
+
+	IMPLEMENT_GLOBAL_SHADER(FGIAG_PoseSpaceConvertCS, "/GameInstancedAnimationGraphShader/GIAG_PoseSpaceConvert_CS.usf", "Main", SF_Compute);
 
 	class FGIAG_TransformBufferFollowCS : public FGlobalShader
 	{
@@ -95,8 +127,7 @@ namespace
 			SHADER_PARAMETER(uint32, NumBones)
 			SHADER_PARAMETER(uint32, NumAttachments)
 
-			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int>, ParentIndices)
-			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_BoneTRS>, LocalPoseTRS)
+			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_BoneTRS>, PoseTRS)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_Transform>, ComponentToWorldBySlot)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_AttachDescPacked>, AttachDescs)
 
@@ -124,8 +155,7 @@ namespace
 			SHADER_PARAMETER(uint32, NumBones)
 			SHADER_PARAMETER(uint32, NumAttachments)
 
-			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int>, ParentIndices)
-			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_BoneTRS>, LocalPoseTRS)
+			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_BoneTRS>, PoseTRS)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_Transform>, ComponentToWorldBySlot)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_AttachDescPacked>, AttachDescs)
 
@@ -278,7 +308,7 @@ namespace GIAG
 
 		FRDGBufferSRVRef ActiveIndicesSRV = Params.ActiveInstanceIndices;
 
-		if (!Params.TransformBuffer || !Params.ParentIndices || !Params.InverseRefPoseTRS || !Params.LocalPoseTRS || !ActiveIndicesSRV || !Params.PrevCacheFloat4)
+		if (!Params.TransformBuffer || !Params.InverseRefPoseTRS || !Params.PoseTRS || !ActiveIndicesSRV || !Params.PrevCacheFloat4)
 		{
 			return;
 		}
@@ -300,9 +330,8 @@ namespace GIAG
 			P->DispatchGroupCountX = (uint32)GroupCount.X;
 			P->DispatchGroupCountY = (uint32)GroupCount.Y;
 			P->DispatchGroupOffset = (uint32)GroupOffset1D;
-			P->ParentIndices = Params.ParentIndices;
 			P->InverseRefPoseTRS = Params.InverseRefPoseTRS;
-			P->LocalPoseTRS = Params.LocalPoseTRS;
+			P->PoseTRS = Params.PoseTRS;
 			P->ActiveInstanceIndices = ActiveIndicesSRV;
 
 			P->UseInitPrevBySlot = (Params.InitPrevBySlot != nullptr) ? 1u : 0u;
@@ -333,6 +362,60 @@ namespace GIAG
 
 			GraphBuilder.AddPass(
 				RDG_EVENT_NAME("GIAG_PoseToTransformBuffer_Chunk"),
+				P,
+				ERDGPassFlags::Compute,
+				[P, CS, GroupCount](FRHIComputeCommandList& RHICmdList)
+				{
+					FComputeShaderUtils::Dispatch(RHICmdList, CS, *P, GroupCount);
+				});
+		});
+	}
+
+	void AddPoseSpaceConvertPasses(FRDGBuilder& GraphBuilder, const FPoseSpaceConvertPassParams& Params)
+	{
+		if (Params.NumBones == 0
+			|| Params.NumInstances == 0
+			|| Params.ActiveInstanceIndices == nullptr
+			|| Params.ParentIndices == nullptr
+			|| Params.SourcePoseTRS == nullptr
+			|| Params.RW_DestinationPoseTRS == nullptr)
+		{
+			return;
+		}
+		if (Params.SourcePoseType == Params.DestinationPoseType)
+		{
+			return;
+		}
+		checkf(
+			(Params.SourcePoseType <= 1u) && (Params.DestinationPoseType <= 1u),
+			TEXT("GIAG: invalid pose convert types (Src=%u Dst=%u)."),
+			Params.SourcePoseType,
+			Params.DestinationPoseType);
+
+		TShaderMapRef<FGIAG_PoseSpaceConvertCS> CS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+
+		constexpr int32 ThreadsPerGroup = 64;
+		const int64 TotalWorkItems = (int64)Params.NumBones * (int64)Params.NumInstances;
+		GIAG::RDGDispatchTiling::ForEachChunk(
+			TotalWorkItems,
+			ThreadsPerGroup,
+			[&](int32 /*ChunkGroups1D*/, int32 GroupOffset1D, const FIntVector& GroupCount)
+		{
+			FGIAG_PoseSpaceConvertCS::FParameters* P = GraphBuilder.AllocParameters<FGIAG_PoseSpaceConvertCS::FParameters>();
+			P->NumBones = Params.NumBones;
+			P->NumInstances = Params.NumInstances;
+			P->SourcePoseType = Params.SourcePoseType;
+			P->DestinationPoseType = Params.DestinationPoseType;
+			P->DispatchGroupCountX = (uint32)GroupCount.X;
+			P->DispatchGroupCountY = (uint32)GroupCount.Y;
+			P->DispatchGroupOffset = (uint32)GroupOffset1D;
+			P->ActiveInstanceIndices = Params.ActiveInstanceIndices;
+			P->ParentIndices = Params.ParentIndices;
+			P->SourcePoseTRS = Params.SourcePoseTRS;
+			P->RW_DestinationPoseTRS = Params.RW_DestinationPoseTRS;
+
+			GraphBuilder.AddPass(
+				RDG_EVENT_NAME("GIAG_PoseSpaceConvert_Chunk"),
 				P,
 				ERDGPassFlags::Compute,
 				[P, CS, GroupCount](FRHIComputeCommandList& RHICmdList)
@@ -425,8 +508,7 @@ namespace GIAG
 	{
 		check(Params.NumBones > 0);
 		check(Params.NumAttachments > 0);
-		check(Params.ParentIndices != nullptr);
-		check(Params.LocalPoseTRS != nullptr);
+		check(Params.PoseTRS != nullptr);
 		check(Params.ComponentToWorldBySlot != nullptr);
 		check(Params.AttachDescs != nullptr);
 		check(Params.RW_FxTransform != nullptr);
@@ -435,8 +517,7 @@ namespace GIAG
 		auto* P = GraphBuilder.AllocParameters<FGIAG_AttachToTransformBufferCS::FParameters>();
 		P->NumBones = Params.NumBones;
 		P->NumAttachments = Params.NumAttachments;
-		P->ParentIndices = Params.ParentIndices;
-		P->LocalPoseTRS = Params.LocalPoseTRS;
+		P->PoseTRS = Params.PoseTRS;
 		P->ComponentToWorldBySlot = Params.ComponentToWorldBySlot;
 		P->AttachDescs = Params.AttachDescs;
 		P->RW_FxTransform = Params.RW_FxTransform;
@@ -454,8 +535,7 @@ namespace GIAG
 	{
 		check(Params.NumBones > 0);
 		check(Params.NumAttachments > 0);
-		check(Params.ParentIndices != nullptr);
-		check(Params.LocalPoseTRS != nullptr);
+		check(Params.PoseTRS != nullptr);
 		check(Params.ComponentToWorldBySlot != nullptr);
 		check(Params.AttachDescs != nullptr);
 		check(Params.RW_InstanceOrigin != nullptr);
@@ -465,8 +545,7 @@ namespace GIAG
 		auto* P = GraphBuilder.AllocParameters<FGIAG_AttachToISMInstanceBuffersCS::FParameters>();
 		P->NumBones = Params.NumBones;
 		P->NumAttachments = Params.NumAttachments;
-		P->ParentIndices = Params.ParentIndices;
-		P->LocalPoseTRS = Params.LocalPoseTRS;
+		P->PoseTRS = Params.PoseTRS;
 		P->ComponentToWorldBySlot = Params.ComponentToWorldBySlot;
 		P->AttachDescs = Params.AttachDescs;
 		P->RW_InstanceOrigin = Params.RW_InstanceOrigin;

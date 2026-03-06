@@ -20,8 +20,16 @@ class USkeletalMesh;
 /** Pin types for GIA AnimGraph. */
 enum class EGIAG_AnimPinType : uint8
 {
-	Pose,
+	/** Skeleton local-space pose (bone local to parent). */
+	LocalPose,
+	/** Skeleton component-space pose (bone relative to component). */
+	ComponentPose,
 };
+
+FORCEINLINE bool GIAG_IsPosePinType(EGIAG_AnimPinType PinType)
+{
+	return PinType == EGIAG_AnimPinType::LocalPose || PinType == EGIAG_AnimPinType::ComponentPose;
+}
 
 /** An input pin reference used in compile-time graph wiring. */
 struct FGIAG_AnimInputPinRef
@@ -121,6 +129,7 @@ struct FGIAG_RDGPoseBuffer
 {
 	FRDGBufferSRVRef SRV = nullptr;
 	FRDGBufferUAVRef UAV = nullptr;
+	EGIAG_AnimPinType PoseType = EGIAG_AnimPinType::LocalPose;
 };
 
 /** Runtime shader-visible bone weights buffer: float weights, 1 per bone. */
@@ -187,11 +196,13 @@ struct FGIAG_AnimNodeDispatchContext
 
 // ---------------- CPU dispatch (new) ----------------
 
-/** CPU pose buffer view: slot-indexed LocalPose in skeleton bone order. */
+/** CPU pose buffer view: slot-indexed pose in skeleton bone order. */
 struct FGIAG_CPUPoseBufferView
 {
 	/** Points to SlotCapacity * NumBones transforms. Index = SlotIndex*NumBones + BoneIndex. */
 	FGIAG_BoneTRS* Data = nullptr;
+	/** Semantic pose space carried by this buffer view. */
+	EGIAG_AnimPinType PoseType = EGIAG_AnimPinType::LocalPose;
 
 	int32 NumBones = 0;
 	int32 SlotCapacity = 0;
@@ -669,7 +680,7 @@ struct TGIAG_AnimNodeMeta : IGIAG_AnimNodeMeta
 		}
 		else
 		{
-			return EGIAG_AnimPinType::Pose;
+			return EGIAG_AnimPinType::LocalPose;
 		}
 	}
 	EGIAG_AnimPinType GetOutputPinType(int32 PinIndex) const override
@@ -680,7 +691,7 @@ struct TGIAG_AnimNodeMeta : IGIAG_AnimNodeMeta
 		}
 		else
 		{
-			return EGIAG_AnimPinType::Pose;
+			return EGIAG_AnimPinType::LocalPose;
 		}
 	}
 

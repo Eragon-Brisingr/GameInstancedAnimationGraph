@@ -360,6 +360,7 @@ void UGameInstancedAnimationGraphSubsystem::PrecomputeCpuPoseCache_GameThread(fl
 					reinterpret_cast<const uint8* const*>(Shard.NodeBasePtrsByNode.GetData()),
 					Shard.NodeBasePtrsByNode.Num());
 				CpuParams.NodeStrideBytes = Shard.NodeStrideBytes;
+				CpuParams.RequestedFinalPoseType = EGIAG_AnimPinType::LocalPose;
 
 				const FGIAG_AnimGraphCpuRunner::FOutputs Outputs = Group.CpuRunner->Evaluate(*Group.Compiled, CpuParams);
 				check(Outputs.FinalLocalPose.IsValid());
@@ -452,6 +453,7 @@ bool UGameInstancedAnimationGraphSubsystem::EvalCpuAnimationPoseAnyThread(const 
 
 	const FTransform SingleC2W = Params.ComponentToWorldBySlot[SlotIndex];
 	PackedParams.ComponentToWorldBySlot = TConstArrayView<FTransform>(&SingleC2W, 1);
+	PackedParams.RequestedFinalPoseType = EGIAG_AnimPinType::LocalPose;
 
 	TArray<const uint8*, TInlineAllocator<64>> PackedNodeData;
 	PackedNodeData.SetNumUninitialized(Params.NodeData.Num());

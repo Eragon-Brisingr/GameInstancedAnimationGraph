@@ -24,7 +24,7 @@ struct GAMEINSTANCEDANIMATIONGRAPHNODE_API FGIAG_LookAtSettings
 
 	/** Blend duration for enable/disable transition. */
 	UPROPERTY(EditAnywhere, Category = "LookAt")
-	float BlendDurationSeconds = 0.15f;
+	float BlendDurationSeconds = 0.2f;
 };
 
 /** Runtime GPU upload payload for one slot. */
@@ -51,6 +51,18 @@ public:
 		Base = 0,
 		Num,
 	};
+
+	static EGIAG_AnimPinType GetInputPinType(int32 PinIndex)
+	{
+		check(PinIndex == (int32)EInputPin::Base);
+		return EGIAG_AnimPinType::ComponentPose;
+	}
+
+	static EGIAG_AnimPinType GetOutputPinType(int32 PinIndex)
+	{
+		check(PinIndex == (int32)EOutputPin::Out);
+		return EGIAG_AnimPinType::ComponentPose;
+	}
 
 	void SetTargetLocationWS(const FGIAG_AnimNodeRef& NodeRef, const FVector& NewTargetLocationWS)
 	{

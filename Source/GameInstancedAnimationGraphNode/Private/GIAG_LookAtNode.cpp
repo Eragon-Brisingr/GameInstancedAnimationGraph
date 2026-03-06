@@ -34,7 +34,6 @@ namespace
 
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_BoneTRS>, BasePose)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_LookAtRuntimeData>, NodeParams)
-			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int>, ParentIndices)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int>, BoneIndexBuffer)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_Transform>, WorldToComponentBySlot)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint32>, ActiveInstanceIndices)
@@ -67,22 +66,6 @@ namespace
 		return RuntimeData.bEnabled ? T : (1.0f - T);
 	}
 
-	static FTransform3f ComposeComponentTransformForBone(
-		const FGIAG_CPUPoseBufferView& Pose,
-		TConstArrayView<int32> ParentIndices,
-		int32 SlotIndex,
-		int32 BoneIndex)
-	{
-		FTransform3f ComponentBone = Pose.At(SlotIndex, BoneIndex);
-		int32 Parent = ParentIndices[BoneIndex];
-		while (Parent >= 0)
-		{
-			ComponentBone = ComponentBone * Pose.At(SlotIndex, Parent);
-			Parent = ParentIndices[Parent];
-		}
-		return ComponentBone;
-	}
-
 	static FVector3f ClampToLookAtCone(const FVector3f& AimVector, const FVector3f& ToTarget, float LookAtClampDegrees)
 	{
 		FVector3f Result = ToTarget;
@@ -111,7 +94,6 @@ namespace
 		float LookAtClampDegrees,
 		FRDGBufferSRVRef BasePose,
 		FRDGBufferSRVRef NodeParams,
-		FRDGBufferSRVRef ParentIndices,
 		FRDGBufferSRVRef BoneIndexBuffer,
 		FRDGBufferSRVRef WorldToComponentBySlot,
 		FRDGBufferSRVRef ActiveInstanceIndices,
@@ -131,7 +113,6 @@ namespace
 		BaseP->NeedNodeWordsPerSlot = NeedNodeWordsPerSlot;
 		BaseP->BasePose = BasePose;
 		BaseP->NodeParams = NodeParams;
-		BaseP->ParentIndices = ParentIndices;
 		BaseP->BoneIndexBuffer = BoneIndexBuffer;
 		BaseP->WorldToComponentBySlot = WorldToComponentBySlot;
 		BaseP->ActiveInstanceIndices = ActiveInstanceIndices;
@@ -275,7 +256,6 @@ void FGIAG_LookAtNode::AddPassesGPU(const FGIAG_AnimNodeDispatchContext& Context
 			Settings->LookAtClamp,
 			Context.InputPosesPerNode[NodeIndexInBatch][(uint8)EInputPin::Base].SRV,
 			Context.NodeParamSRVsPerNode[NodeIndexInBatch],
-			Context.ParentIndicesSRV,
 			BoneIndexSRV,
 			Context.WorldToComponentBySlotSRV,
 			Context.ActiveInstanceIndicesSRV,
@@ -292,7 +272,6 @@ void FGIAG_LookAtNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& Cont
 	check(Context.InputPosesPerNode.Num() == Context.NodeIndices.Num());
 	check(Context.OutputPosesPerNode.Num() == Context.NodeIndices.Num());
 	check(Context.ComponentToWorldBySlot.Num() == Context.SlotCapacity);
-	check(Context.ParentIndices.Num() == Context.NumBones);
 
 	for (int32 NodeIndexInBatch = 0; NodeIndexInBatch < Context.NodeIndices.Num(); ++NodeIndexInBatch)
 	{
@@ -309,11 +288,12 @@ void FGIAG_LookAtNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& Cont
 		checkf(BoneIndexPtr != nullptr, TEXT("GIAG LookAt: BoneIndex optional resource missing for node in batch %d."), NodeIndexInBatch);
 		const int32 BoneIndex = *BoneIndexPtr;
 		check(BoneIndex >= 0 && BoneIndex < Context.NumBones);
-		const int32 ParentBoneIndex = Context.ParentIndices[BoneIndex];
 
 		const FGIAG_CPUPoseBufferView BasePose = Context.InputPosesPerNode[NodeIndexInBatch][(uint8)EInputPin::Base];
 		const FGIAG_CPUPoseBufferView OutPose = Context.OutputPosesPerNode[NodeIndexInBatch][(uint8)EOutputPin::Out];
 		check(BasePose.IsValid() && OutPose.IsValid());
+		check(BasePose.PoseType == EGIAG_AnimPinType::ComponentPose);
+		check(OutPose.PoseType == EGIAG_AnimPinType::ComponentPose);
 
 		for (const int32 SlotIndex : Context.ActiveInstanceIndices)
 		{
@@ -332,11 +312,8 @@ void FGIAG_LookAtNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& Cont
 				continue;
 			}
 
-			const FTransform3f BoneCS = ComposeComponentTransformForBone(BasePose, Context.ParentIndices, SlotIndex, BoneIndex);
+			const FTransform3f BoneCS = BasePose.At(SlotIndex, BoneIndex);
 			const FQuat BoneCSRot = FQuat(BoneCS.GetRotation());
-			const FQuat ParentCSRot = (ParentBoneIndex >= 0)
-				? FQuat(ComposeComponentTransformForBone(BasePose, Context.ParentIndices, SlotIndex, ParentBoneIndex).GetRotation())
-				: FQuat::Identity;
 
 			const FVector3f AimVectorCS = FVector3f(BoneCSRot.RotateVector(FVector(LookAtAxisLocal))).GetSafeNormal();
 			checkf(!AimVectorCS.IsNearlyZero(), TEXT("GIAG LookAt: Aim vector must be non-zero after rotation."));
@@ -350,13 +327,10 @@ void FGIAG_LookAtNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& Cont
 			FQuat BlendedDeltaCS = FQuat::Slerp(FQuat::Identity, DeltaCS, Alpha);
 			BlendedDeltaCS.Normalize();
 
-			const FQuat NewBoneCSRot = BlendedDeltaCS * BoneCSRot;
-			const FQuat NewLocalRot = (ParentBoneIndex >= 0)
-				? (ParentCSRot.Inverse() * NewBoneCSRot).GetNormalized()
-				: NewBoneCSRot.GetNormalized();
+			const FQuat NewBoneCSRot = (BlendedDeltaCS * BoneCSRot).GetNormalized();
 
 			FGIAG_BoneTRS& OutBone = OutPose.At(SlotIndex, BoneIndex);
-			OutBone.SetRotation(FQuat4f(NewLocalRot));
+			OutBone.SetRotation(FQuat4f(NewBoneCSRot));
 		}
 	}
 }

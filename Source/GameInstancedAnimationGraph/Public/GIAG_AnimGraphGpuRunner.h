@@ -142,6 +142,7 @@ struct FGIAG_AnimGraphPersistentResources
 	{
 		TRefCountPtr<FRDGPooledBuffer> Buffer;
 		uint32 NumTransforms = 0;
+		EGIAG_AnimPinType PoseType = EGIAG_AnimPinType::LocalPose;
 	};
 
 	/** Node-type parameter buffer for a specific node in the graph (first version: one buffer per node). */
@@ -254,7 +255,10 @@ public:
 
 	struct FOutputs
 	{
-		/** Slot-indexed Final LocalPose buffer (TRS, NumBones * FGIAG_BoneTRS per slot). Null if graph has no final pose output. */
+		/** Slot-indexed final pose buffer (TRS, NumBones * FGIAG_BoneTRS per slot). Null if graph has no final pose output. */
+		FRDGBufferRef FinalPoseBuffer = nullptr;
+		EGIAG_AnimPinType FinalPoseType = EGIAG_AnimPinType::ComponentPose;
+		/** Backward-compatible alias. Final convergence makes this null in normal paths. */
 		FRDGBufferRef FinalLocalPoseBuffer = nullptr;
 		/** Slot-indexed NeedNodeBits buffer (StructuredBuffer<uint32>). Null if not allocated. */
 		FRDGBufferRef NeedNodeBitsBuffer = nullptr;
@@ -266,6 +270,8 @@ public:
 		FRDGBufferSRVRef ParentIndicesSRV = nullptr;
 		/** Per-slot component->world transforms (StructuredBuffer<FGIAG_Transform>). */
 		FRDGBufferSRVRef ComponentToWorldBySlotSRV = nullptr;
+		/** ActiveIndex -> SlotIndex mapping (StructuredBuffer<uint32>). */
+		FRDGBufferSRVRef ActiveInstanceIndicesSRV = nullptr;
 	};
 
 	/** Render-thread: add all RDG passes for one evaluation to an existing GraphBuilder (caller executes). */

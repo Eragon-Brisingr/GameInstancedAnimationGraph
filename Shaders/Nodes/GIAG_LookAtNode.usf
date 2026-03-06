@@ -25,7 +25,6 @@ uint DispatchGroupOffset;
 
 StructuredBuffer<FGIAG_BoneTRS> BasePose;
 StructuredBuffer<FGIAG_LookAtRuntimeData> NodeParams;
-StructuredBuffer<int> ParentIndices;
 StructuredBuffer<int> BoneIndexBuffer;
 StructuredBuffer<FGIAG_Transform> WorldToComponentBySlot;
 StructuredBuffer<uint> ActiveInstanceIndices; // ActiveIndex -> SlotIndex
@@ -47,18 +46,6 @@ float GIAG_ComputeEnableAlpha(FGIAG_LookAtRuntimeData RuntimeData)
 float3 GIAG_TransformPoint(FGIAG_Transform Transform, float3 Point)
 {
 	return GIAG_QuatRotateVector(Transform.Rotation, Transform.Scale3D * Point) + Transform.Translation;
-}
-
-FGIAG_BoneTRS GIAG_ComputeComponentTransformForBone(uint SlotIndex, uint BoneIndex)
-{
-	FGIAG_BoneTRS ComponentBone = BasePose[SlotIndex * NumBones + BoneIndex];
-	int Parent = ParentIndices[BoneIndex];
-	while (Parent >= 0)
-	{
-		ComponentBone = GIAG_MultiplyBoneTRS(ComponentBone, BasePose[SlotIndex * NumBones + (uint)Parent]);
-		Parent = ParentIndices[(uint)Parent];
-	}
-	return ComponentBone;
 }
 
 FQuat GIAG_FindBetweenNormals(float3 A, float3 B)
@@ -133,7 +120,7 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 		return;
 	}
 
-	FGIAG_BoneTRS BoneCS = GIAG_ComputeComponentTransformForBone(SlotIndex, BoneToModify);
+	FGIAG_BoneTRS BoneCS = BasePose[OutIndex];
 	float3 TargetCS = GIAG_TransformPoint(WorldToComponentBySlot[SlotIndex], RuntimeData.TargetLocationWS);
 	float3 AimVectorCS = normalize(GIAG_QuatRotateVector(BoneCS.Rotation, LookAtAxisLocal));
 	float3 ToTarget = normalize(TargetCS - BoneCS.Translation);
@@ -152,19 +139,9 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 		DeltaCS.w * Alpha + OneMinus);
 	BlendedDelta = GIAG_NormalizeQuat(BlendedDelta);
 
-	FQuat NewBoneCSRot = GIAG_QuatMultiply(BlendedDelta, BoneCS.Rotation);
-
-	int ParentBone = ParentIndices[BoneToModify];
-	FQuat ParentCSRot = float4(0.0, 0.0, 0.0, 1.0);
-	if (ParentBone >= 0)
-	{
-		ParentCSRot = GIAG_ComputeComponentTransformForBone(SlotIndex, (uint)ParentBone).Rotation;
-	}
-	FQuat ParentInv = float4(-ParentCSRot.x, -ParentCSRot.y, -ParentCSRot.z, ParentCSRot.w);
-	FQuat NewLocalRot = GIAG_QuatMultiply(ParentInv, NewBoneCSRot);
-	NewLocalRot = GIAG_NormalizeQuat(NewLocalRot);
+	FQuat NewBoneCSRot = GIAG_NormalizeQuat(GIAG_QuatMultiply(BlendedDelta, BoneCS.Rotation));
 
 	FGIAG_BoneTRS OutBone = RW_OutPose[OutIndex];
-	OutBone.Rotation = NewLocalRot;
+	OutBone.Rotation = NewBoneCSRot;
 	RW_OutPose[OutIndex] = OutBone;
 }

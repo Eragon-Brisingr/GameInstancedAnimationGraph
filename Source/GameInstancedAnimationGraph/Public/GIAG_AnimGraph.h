@@ -34,13 +34,35 @@ private:
 	FGIAGShaderMap* Ptr = nullptr;
 };
 
-/** Compiled schedule step: execute a consecutive batch of nodes with the same node type (USTRUCT FName). */
+enum class EGIAG_AnimDispatchBatchKind : uint8
+{
+	Node,
+	PoseSpaceConvert,
+};
+
+/** Compiled pose space conversion task: src pose resource -> dst pose resource. */
+struct FGIAG_AnimPoseConvertTask
+{
+	int32 SrcPoseResource = INDEX_NONE;
+	int32 DstPoseResource = INDEX_NONE;
+	EGIAG_AnimPinType SrcPoseType = EGIAG_AnimPinType::LocalPose;
+	EGIAG_AnimPinType DstPoseType = EGIAG_AnimPinType::LocalPose;
+	/** Node index that first consumes DstPoseResource in ExecOrder. */
+	int32 FirstConsumerNodeIndex = INDEX_NONE;
+};
+
+/** Compiled schedule step: execute node batch or pose conversion batch. */
 struct FGIAG_AnimDispatchBatch
 {
-	/** Node type id = NodeType->GetStruct()->GetFName() */
+	EGIAG_AnimDispatchBatchKind Kind = EGIAG_AnimDispatchBatchKind::Node;
+
+	/** Node batch only: node type id = NodeType->GetStruct()->GetFName(). */
 	FName TypeId;
 
+	/** Node batch only. */
 	TArray<int32> NodeIndices;
+	/** PoseSpaceConvert batch only. */
+	TArray<int32> ConvertTaskIndices;
 };
 
 /** Per-node compiled metadata. */
@@ -68,13 +90,13 @@ struct FGIAG_AnimCompiledNode
 
 	int32 NumOutputPins = 0;
 
-	/** Input pin sources (pose-only for v1). Size = NumInputPins; INDEX_NONE if unconnected. */
+	/** Input pin sources. Size = NumInputPins; INDEX_NONE if unconnected. */
 	TArray<FGIAG_AnimOutputPinRef> InputSources;
 
-	/** Resolved pose resource indices for each input pin (only valid when pin type is Pose). */
+	/** Resolved pose resource indices for each pose-typed input pin. */
 	TArray<int32> InputPoseResources;
 
-	/** Pose resource indices for each output pin (only valid when pin type is Pose). */
+	/** Pose resource indices for each pose-typed output pin. */
 	TArray<int32> OutputPoseResources;
 };
 
@@ -87,6 +109,11 @@ struct FGIAG_AnimGraphCompiledData
 	int32 NumNodes = 0;
 
 	int32 NumPoseResources = 0;
+	/** Pose type for each pose resource index. Size = NumPoseResources. */
+	TArray<EGIAG_AnimPinType> PoseResourceTypes;
+
+	/** Compiled pose-space conversion tasks inserted by the compiler for cross-space edges. */
+	TArray<FGIAG_AnimPoseConvertTask> PoseConvertTasks;
 
 	TArray<FGIAG_AnimCompiledNode> Nodes;
 
@@ -97,7 +124,7 @@ struct FGIAG_AnimGraphCompiledData
 	/**
 	 * Reverse topological order grouped by node type.
 	 *
-	 * Equivalent to iterating ExecOrder from back to front, but expressed as batches:
+	 * Equivalent to iterating ExecOrder from back to front, but expressed as node batches:
 	 * - batches are in reverse execution order
 	 * - within each batch, NodeIndices are also in reverse order
 	 *
@@ -119,6 +146,10 @@ struct FGIAG_AnimGraphCompiledData
 
 	/** Which output pose pin is the final pose to be skinned. */
 	FGIAG_AnimOutputPinRef FinalPoseOutput;
+	/** Final pose resource resolved by compiler (forced to ComponentPose). */
+	int32 FinalPoseResource = INDEX_NONE;
+	/** Final pose space resolved by compiler. */
+	EGIAG_AnimPinType FinalPoseType = EGIAG_AnimPinType::LocalPose;
 
 	/** Graph hash for shader specialization / caches (stable across runs for identical topology). */
 	uint64 GraphHash = 0;

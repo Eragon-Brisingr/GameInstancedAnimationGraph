@@ -92,6 +92,11 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 	checkf(Params.ActiveInstanceIndices.Num() == Params.NumInstances,
 		TEXT("GIAG: AddPassesGPU ActiveInstanceIndices mismatch (Active=%d NumInstances=%d)."),
 		Params.ActiveInstanceIndices.Num(), Params.NumInstances);
+	checkf(
+		CompiledData.PoseResourceTypes.Num() == CompiledData.NumPoseResources,
+		TEXT("GIAG: PoseResourceTypes mismatch (Types=%d PoseResources=%d)."),
+		CompiledData.PoseResourceTypes.Num(),
+		CompiledData.NumPoseResources);
 
 	// Ensure persistent arrays are sized for this compiled graph (RT-only).
 	if (Resources.PoseOutputs.Num() != CompiledData.NumPoseResources)
@@ -255,6 +260,7 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 			FRDGBufferDesc::CreateStructuredDesc(sizeof(FGIAG_BoneTRS), PoseTransforms),
 			TEXT("GIAG_AG_Pose"));
 		PoseResource.NumTransforms = PoseTransforms;
+		PoseResource.PoseType = CompiledData.PoseResourceTypes[PoseIdx];
 		PoseRDGs[PoseIdx] = PoseRDG;
 		PoseSRVs[PoseIdx] = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(PoseRDG));
 		PoseUAVs[PoseIdx] = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(PoseRDG));
@@ -384,6 +390,7 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 	}
 
 	FRDGBufferSRVRef ActiveIndicesSRV = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(ActiveRDG));
+	Outputs.ActiveInstanceIndicesSRV = ActiveIndicesSRV;
 
 	// ---------------------------------------------------------------------
 	// GPU node culling mask (v2): build per-slot node-needed bitset.
@@ -452,6 +459,30 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 	// Execute schedule.
 	for (const FGIAG_AnimDispatchBatch& Batch : CompiledData.DispatchSchedule)
 	{
+		if (Batch.Kind == EGIAG_AnimDispatchBatchKind::PoseSpaceConvert)
+		{
+			for (const int32 ConvertTaskIndex : Batch.ConvertTaskIndices)
+			{
+				check(CompiledData.PoseConvertTasks.IsValidIndex(ConvertTaskIndex));
+				const FGIAG_AnimPoseConvertTask& ConvertTask = CompiledData.PoseConvertTasks[ConvertTaskIndex];
+				check(ConvertTask.SrcPoseResource >= 0 && ConvertTask.SrcPoseResource < PoseSRVs.Num());
+				check(ConvertTask.DstPoseResource >= 0 && ConvertTask.DstPoseResource < PoseUAVs.Num());
+
+				GIAG::FPoseSpaceConvertPassParams ConvertParams;
+				ConvertParams.NumBones = (uint32)Params.NumBones;
+				ConvertParams.NumInstances = (uint32)Params.NumInstances;
+				ConvertParams.SourcePoseType = (ConvertTask.SrcPoseType == EGIAG_AnimPinType::ComponentPose) ? 1u : 0u;
+				ConvertParams.DestinationPoseType = (ConvertTask.DstPoseType == EGIAG_AnimPinType::ComponentPose) ? 1u : 0u;
+				ConvertParams.ActiveInstanceIndices = ActiveIndicesSRV;
+				ConvertParams.ParentIndices = ParentSRV;
+				ConvertParams.SourcePoseTRS = PoseSRVs[ConvertTask.SrcPoseResource];
+				ConvertParams.RW_DestinationPoseTRS = PoseUAVs[ConvertTask.DstPoseResource];
+				GIAG::AddPoseSpaceConvertPasses(GraphBuilder, ConvertParams);
+			}
+			continue;
+		}
+
+		check(Batch.Kind == EGIAG_AnimDispatchBatchKind::Node);
 		if (Batch.NodeIndices.Num() == 0)
 		{
 			continue;
@@ -484,7 +515,8 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 			InPoses.SetNum(CompiledNode.NumInputPins);
 			for (int32 InputPinIndex = 0; InputPinIndex < CompiledNode.NumInputPins; ++InputPinIndex)
 			{
-				if (CompiledNode.NodeMeta->GetInputPinType(InputPinIndex) != EGIAG_AnimPinType::Pose)
+				const EGIAG_AnimPinType InputType = CompiledNode.NodeMeta->GetInputPinType(InputPinIndex);
+				if (!GIAG_IsPosePinType(InputType))
 				{
 					continue;
 				}
@@ -492,6 +524,7 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 				if (PoseResourceIndex >= 0)
 				{
 					InPoses[InputPinIndex].SRV = PoseSRVs[PoseResourceIndex];
+					InPoses[InputPinIndex].PoseType = InputType;
 				}
 			}
 			BatchInputPoses.Add(MoveTemp(InPoses));
@@ -501,7 +534,8 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 			OutPoses.SetNum(CompiledNode.NumOutputPins);
 			for (int32 OutputPinIndex = 0; OutputPinIndex < CompiledNode.NumOutputPins; ++OutputPinIndex)
 			{
-				if (CompiledNode.NodeMeta->GetOutputPinType(OutputPinIndex) != EGIAG_AnimPinType::Pose)
+				const EGIAG_AnimPinType OutputType = CompiledNode.NodeMeta->GetOutputPinType(OutputPinIndex);
+				if (!GIAG_IsPosePinType(OutputType))
 				{
 					continue;
 				}
@@ -509,6 +543,7 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 				if (PoseResourceIndex >= 0)
 				{
 					OutPoses[OutputPinIndex].UAV = PoseUAVs[PoseResourceIndex];
+					OutPoses[OutputPinIndex].PoseType = OutputType;
 				}
 			}
 			BatchOutputPoses.Add(MoveTemp(OutPoses));
@@ -593,24 +628,28 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 	}
 
 	// Finalize:
-	// - local pose -> UE TransformBuffer (RWByteAddressBuffer).
+	// - component pose -> UE TransformBuffer (RWByteAddressBuffer).
 	if (CompiledData.FinalPoseOutput.NodeIndex >= 0)
 	{
-		const FGIAG_AnimCompiledNode& FinalNode = CompiledData.Nodes[CompiledData.FinalPoseOutput.NodeIndex];
-		const int32 FinalPoseRes = FinalNode.OutputPoseResources[CompiledData.FinalPoseOutput.PinIndex];
+		const EGIAG_AnimPinType FinalPoseType = CompiledData.FinalPoseType;
+		const int32 FinalPoseRes = CompiledData.FinalPoseResource;
+		checkf(
+			FinalPoseType == EGIAG_AnimPinType::ComponentPose,
+			TEXT("GIAG_AnimGraphGpuRunner: expected final pose type ComponentPose after compile-time convergence."));
 
 		if (FinalPoseRes >= 0)
 		{
-			Outputs.FinalLocalPoseBuffer = PoseRDGs[FinalPoseRes];
+			Outputs.FinalPoseBuffer = PoseRDGs[FinalPoseRes];
+			Outputs.FinalPoseType = FinalPoseType;
+			Outputs.FinalLocalPoseBuffer = nullptr;
 
 			GIAG::FPoseToTransformBufferPassParams TBParams;
 			TBParams.NumBones = (uint32)Params.NumBones;
 			TBParams.NumInstances = (uint32)Params.NumInstances;
 			TBParams.TransformOffset = Params.TransformBufferOffset;
 			TBParams.ActiveInstanceIndices = ActiveIndicesSRV;
-			TBParams.ParentIndices = ParentSRV;
 			TBParams.InverseRefPoseTRS = InvSRV;
-			TBParams.LocalPoseTRS = PoseSRVs[FinalPoseRes];
+			TBParams.PoseTRS = PoseSRVs[FinalPoseRes];
 			TBParams.TransformBuffer = Params.OutputTransformBuffer;
 			TBParams.PrevCacheFloat4 = PrevCacheRDG;
 			TBParams.ForceInitPrevAllSlots = bPrevCacheRecreated ? 1u : 0u;

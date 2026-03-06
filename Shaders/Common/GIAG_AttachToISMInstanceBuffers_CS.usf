@@ -13,8 +13,7 @@
 uint NumBones;
 uint NumAttachments;
 
-StructuredBuffer<int> ParentIndices;
-StructuredBuffer<FGIAG_BoneTRS> LocalPoseTRS; // slot-indexed, one per bone
+StructuredBuffer<FGIAG_BoneTRS> PoseTRS; // slot-indexed, one per bone
 StructuredBuffer<FGIAG_Transform> ComponentToWorldBySlot; // slot-indexed (alias of FTransform3f layout)
 
 struct FGIAG_AttachDescPacked
@@ -31,9 +30,9 @@ StructuredBuffer<FGIAG_AttachDescPacked> AttachDescs;
 RWBuffer<float4> RW_InstanceOrigin;     // [Index]
 RWBuffer<float4> RW_InstanceTransform;  // [Index*3 + 0..2]
 
-FGIAG_BoneTRS ReadLocalPoseTRS(in uint SlotIndex, in uint BoneIndex)
+FGIAG_BoneTRS ReadPoseTRS(in uint SlotIndex, in uint BoneIndex)
 {
-	return LocalPoseTRS[SlotIndex * NumBones + BoneIndex];
+	return PoseTRS[SlotIndex * NumBones + BoneIndex];
 }
 
 [numthreads(THREADS_X, 1, 1)]
@@ -55,16 +54,8 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 		return;
 	}
 
-	// Bone global (component space) from local pose chain.
-	FGIAG_BoneTRS GlobalT = ReadLocalPoseTRS(D.SlotIndex, D.BoneIndex);
-	int Parent = ParentIndices[D.BoneIndex];
-	int Guard = (int)NumBones + 1;
-	while (Parent >= 0 && Guard-- > 0)
-	{
-		FGIAG_BoneTRS ParentLocal = ReadLocalPoseTRS(D.SlotIndex, (uint)Parent);
-		GlobalT = GIAG_MultiplyBoneTRS(GlobalT, ParentLocal);
-		Parent = ParentIndices[Parent];
-	}
+	// Bone component-space transform (final pose is compiler-forced ComponentPose).
+	FGIAG_BoneTRS GlobalT = ReadPoseTRS(D.SlotIndex, D.BoneIndex);
 
 	// Socket in component space: BoneGlobal ∘ SocketLocal.
 	FGIAG_BoneTRS SocketCS = GIAG_MultiplyBoneTRS(D.SocketLocalTRS, GlobalT);

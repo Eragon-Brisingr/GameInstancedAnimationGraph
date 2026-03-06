@@ -6,6 +6,9 @@
 #include "Animation/Skeleton.h"
 #include "Engine/SkeletalMesh.h"
 
+#include "GIAG_PoseSpaceConvert.ispc.generated.h"
+static_assert(sizeof(ispc::FGIAG_BoneTRS) == sizeof(FGIAG_BoneTRS), "GIAG ISPC: FGIAG_BoneTRS layout mismatch.");
+
 namespace
 {
 	static void EnsurePoseResourceSize(
@@ -18,6 +21,44 @@ namespace
 		{
 			InOut.SetNumZeroed(Needed);
 		}
+	}
+
+	static void ConvertLocalPoseToComponentPose(
+		const FGIAG_BoneTRS* SourcePose,
+		FGIAG_BoneTRS* DestinationPose,
+		int32 NumBones,
+		int32 NumInstances,
+		int32 SlotCapacity,
+		TConstArrayView<uint32> ActiveInstanceIndices,
+		TConstArrayView<int32> ParentIndices)
+	{
+		ispc::GIAG_ConvertLocalToComponentPoseTRS(
+			NumBones,
+			NumInstances,
+			SlotCapacity,
+			(const uint32*)ActiveInstanceIndices.GetData(),
+			(const int32*)ParentIndices.GetData(),
+			(const ispc::FGIAG_BoneTRS*)SourcePose,
+			(ispc::FGIAG_BoneTRS*)DestinationPose);
+	}
+
+	static void ConvertComponentPoseToLocalPose(
+		const FGIAG_BoneTRS* SourcePose,
+		FGIAG_BoneTRS* DestinationPose,
+		int32 NumBones,
+		int32 NumInstances,
+		int32 SlotCapacity,
+		TConstArrayView<uint32> ActiveInstanceIndices,
+		TConstArrayView<int32> ParentIndices)
+	{
+		ispc::GIAG_ConvertComponentToLocalPoseTRS(
+			NumBones,
+			NumInstances,
+			SlotCapacity,
+			(const uint32*)ActiveInstanceIndices.GetData(),
+			(const int32*)ParentIndices.GetData(),
+			(const ispc::FGIAG_BoneTRS*)SourcePose,
+			(ispc::FGIAG_BoneTRS*)DestinationPose);
 	}
 }
 
@@ -143,6 +184,10 @@ FGIAG_AnimGraphCpuRunner::FOutputs FGIAG_AnimGraphCpuRunner::Evaluate(
 	check(Params.ComponentToWorldBySlot.Num() == Params.SlotCapacity);
 	check(Params.NodeData.Num() == CompiledData.NumNodes);
 	check(Params.NodeStrideBytes.Num() == CompiledData.NumNodes);
+	check(CompiledData.PoseResourceTypes.Num() == CompiledData.NumPoseResources);
+	checkf(
+		GIAG_IsPosePinType(Params.RequestedFinalPoseType),
+		TEXT("GIAG_AnimGraphCpuRunner: RequestedFinalPoseType must be pose-typed."));
 
 	EnsureResourceCache(CompiledData, Params.Skeleton);
 
@@ -161,6 +206,24 @@ FGIAG_AnimGraphCpuRunner::FOutputs FGIAG_AnimGraphCpuRunner::Evaluate(
 	}
 
 	const bool bShouldCullNodes = (CompiledData.bEnableNodeCull && CompiledData.FinalPoseOutput.NodeIndex >= 0);
+	const bool bRequestFinalLocalPose = (Params.RequestedFinalPoseType == EGIAG_AnimPinType::LocalPose);
+	int32 OriginalFinalPoseResource = INDEX_NONE;
+	EGIAG_AnimPinType OriginalFinalPoseType = EGIAG_AnimPinType::LocalPose;
+	bool bCanServeRequestedLocalPoseDirectly = false;
+	if (CompiledData.FinalPoseOutput.NodeIndex >= 0)
+	{
+		check(CompiledData.Nodes.IsValidIndex(CompiledData.FinalPoseOutput.NodeIndex));
+		const FGIAG_AnimCompiledNode& FinalOutputNode = CompiledData.Nodes[CompiledData.FinalPoseOutput.NodeIndex];
+		check(FinalOutputNode.NodeMeta != nullptr);
+		check(FinalOutputNode.OutputPoseResources.IsValidIndex(CompiledData.FinalPoseOutput.PinIndex));
+		OriginalFinalPoseType = FinalOutputNode.NodeMeta->GetOutputPinType(CompiledData.FinalPoseOutput.PinIndex);
+		checkf(
+			GIAG_IsPosePinType(OriginalFinalPoseType),
+			TEXT("GIAG_AnimGraphCpuRunner: FinalPoseOutput must be pose-typed."));
+		OriginalFinalPoseResource = FinalOutputNode.OutputPoseResources[CompiledData.FinalPoseOutput.PinIndex];
+		check(OriginalFinalPoseResource >= 0 && OriginalFinalPoseResource < PoseResources.Num());
+		bCanServeRequestedLocalPoseDirectly = bRequestFinalLocalPose && (OriginalFinalPoseType == EGIAG_AnimPinType::LocalPose);
+	}
 
 	// Bitset layout (node-indexed):
 	// - Pack 32 node flags into one uint32 word.
@@ -293,6 +356,55 @@ FGIAG_AnimGraphCpuRunner::FOutputs FGIAG_AnimGraphCpuRunner::Evaluate(
 	// Execute schedule (batch-based).
 	for (const FGIAG_AnimDispatchBatch& Batch : CompiledData.DispatchSchedule)
 	{
+		if (Batch.Kind == EGIAG_AnimDispatchBatchKind::PoseSpaceConvert)
+		{
+			for (const int32 ConvertTaskIndex : Batch.ConvertTaskIndices)
+			{
+				check(CompiledData.PoseConvertTasks.IsValidIndex(ConvertTaskIndex));
+				const FGIAG_AnimPoseConvertTask& ConvertTask = CompiledData.PoseConvertTasks[ConvertTaskIndex];
+				if (bCanServeRequestedLocalPoseDirectly && ConvertTask.FirstConsumerNodeIndex == INDEX_NONE)
+				{
+					// Final-only convergence task is not needed when CPU caller explicitly requests local final pose.
+					continue;
+				}
+				check(ConvertTask.SrcPoseResource >= 0 && ConvertTask.SrcPoseResource < PoseResources.Num());
+				check(ConvertTask.DstPoseResource >= 0 && ConvertTask.DstPoseResource < PoseResources.Num());
+				const TArray<FGIAG_BoneTRS>& SrcPose = PoseResources[ConvertTask.SrcPoseResource];
+				TArray<FGIAG_BoneTRS>& DstPose = PoseResources[ConvertTask.DstPoseResource];
+
+				if (ConvertTask.SrcPoseType == EGIAG_AnimPinType::LocalPose
+					&& ConvertTask.DstPoseType == EGIAG_AnimPinType::ComponentPose)
+				{
+					ConvertLocalPoseToComponentPose(
+						SrcPose.GetData(),
+						DstPose.GetData(),
+						Params.NumBones,
+						Params.NumInstances,
+						Params.SlotCapacity,
+						Params.ActiveInstanceIndices,
+						Params.ParentIndices);
+				}
+				else if (ConvertTask.SrcPoseType == EGIAG_AnimPinType::ComponentPose
+					&& ConvertTask.DstPoseType == EGIAG_AnimPinType::LocalPose)
+				{
+					ConvertComponentPoseToLocalPose(
+						SrcPose.GetData(),
+						DstPose.GetData(),
+						Params.NumBones,
+						Params.NumInstances,
+						Params.SlotCapacity,
+						Params.ActiveInstanceIndices,
+						Params.ParentIndices);
+				}
+				else
+				{
+					checkNoEntry();
+				}
+			}
+			continue;
+		}
+
+		check(Batch.Kind == EGIAG_AnimDispatchBatchKind::Node);
 		if (Batch.NodeIndices.Num() == 0)
 		{
 			continue;
@@ -343,7 +455,8 @@ FGIAG_AnimGraphCpuRunner::FOutputs FGIAG_AnimGraphCpuRunner::Evaluate(
 			InPoses.SetNum(CompiledNode.NumInputPins);
 			for (int32 InputPinIndex = 0; InputPinIndex < CompiledNode.NumInputPins; ++InputPinIndex)
 			{
-				if (CompiledNode.NodeMeta->GetInputPinType(InputPinIndex) != EGIAG_AnimPinType::Pose)
+				const EGIAG_AnimPinType InputType = CompiledNode.NodeMeta->GetInputPinType(InputPinIndex);
+				if (!GIAG_IsPosePinType(InputType))
 				{
 					continue;
 				}
@@ -353,6 +466,7 @@ FGIAG_AnimGraphCpuRunner::FOutputs FGIAG_AnimGraphCpuRunner::Evaluate(
 					InPoses[InputPinIndex] =
 					{
 						.Data = PoseResources[PoseResourceIndex].GetData(),
+						.PoseType = InputType,
 						.NumBones = Params.NumBones,
 						.SlotCapacity = Params.SlotCapacity,
 					};
@@ -365,7 +479,8 @@ FGIAG_AnimGraphCpuRunner::FOutputs FGIAG_AnimGraphCpuRunner::Evaluate(
 			OutPoses.SetNum(CompiledNode.NumOutputPins);
 			for (int32 OutputPinIndex = 0; OutputPinIndex < CompiledNode.NumOutputPins; ++OutputPinIndex)
 			{
-				if (CompiledNode.NodeMeta->GetOutputPinType(OutputPinIndex) != EGIAG_AnimPinType::Pose)
+				const EGIAG_AnimPinType OutputType = CompiledNode.NodeMeta->GetOutputPinType(OutputPinIndex);
+				if (!GIAG_IsPosePinType(OutputType))
 				{
 					continue;
 				}
@@ -375,6 +490,7 @@ FGIAG_AnimGraphCpuRunner::FOutputs FGIAG_AnimGraphCpuRunner::Evaluate(
 					OutPoses[OutputPinIndex] =
 					{
 						.Data = PoseResources[PoseResourceIndex].GetData(),
+						.PoseType = OutputType,
 						.NumBones = Params.NumBones,
 						.SlotCapacity = Params.SlotCapacity,
 					};
@@ -471,16 +587,74 @@ FGIAG_AnimGraphCpuRunner::FOutputs FGIAG_AnimGraphCpuRunner::Evaluate(
 	FOutputs Outputs;
 	if (CompiledData.FinalPoseOutput.NodeIndex >= 0)
 	{
-		const FGIAG_AnimCompiledNode& FinalNode = CompiledData.Nodes[CompiledData.FinalPoseOutput.NodeIndex];
-		const int32 FinalPoseRes = FinalNode.OutputPoseResources[CompiledData.FinalPoseOutput.PinIndex];
-		if (FinalPoseRes >= 0)
+		if (bCanServeRequestedLocalPoseDirectly)
 		{
-			Outputs.FinalLocalPose =
+			TArray<FGIAG_BoneTRS>& FinalLocalPose = PoseResources[OriginalFinalPoseResource];
+			Outputs.FinalPose =
 			{
-				.Data = PoseResources[FinalPoseRes].GetData(),
+				.Data = FinalLocalPose.GetData(),
+				.PoseType = EGIAG_AnimPinType::LocalPose,
 				.NumBones = Params.NumBones,
 				.SlotCapacity = Params.SlotCapacity,
 			};
+			Outputs.FinalPoseType = EGIAG_AnimPinType::LocalPose;
+			Outputs.FinalLocalPose = Outputs.FinalPose;
+			return Outputs;
+		}
+
+		const EGIAG_AnimPinType FinalPoseType = CompiledData.FinalPoseType;
+		const int32 FinalPoseRes = CompiledData.FinalPoseResource;
+		checkf(
+			FinalPoseType == EGIAG_AnimPinType::ComponentPose,
+			TEXT("GIAG_AnimGraphCpuRunner: expected final pose type ComponentPose after compile-time convergence."));
+		if (FinalPoseRes >= 0)
+		{
+			TArray<FGIAG_BoneTRS>& FinalComponentPose = PoseResources[FinalPoseRes];
+			if (Params.RequestedFinalPoseType == EGIAG_AnimPinType::ComponentPose)
+			{
+				Outputs.FinalPose =
+				{
+					.Data = FinalComponentPose.GetData(),
+					.PoseType = EGIAG_AnimPinType::ComponentPose,
+					.NumBones = Params.NumBones,
+					.SlotCapacity = Params.SlotCapacity,
+				};
+				Outputs.FinalPoseType = EGIAG_AnimPinType::ComponentPose;
+				Outputs.FinalLocalPose = {};
+			}
+			else
+			{
+				checkf(
+					Params.RequestedFinalPoseType == EGIAG_AnimPinType::LocalPose,
+					TEXT("GIAG_AnimGraphCpuRunner: unsupported RequestedFinalPoseType=%u."),
+					(uint32)Params.RequestedFinalPoseType);
+
+				if (FinalLocalScratchSlotCapacity != Params.SlotCapacity || FinalLocalScratchNumBones != Params.NumBones)
+				{
+					EnsurePoseResourceSize(FinalLocalScratch, Params.SlotCapacity, Params.NumBones);
+					FinalLocalScratchSlotCapacity = Params.SlotCapacity;
+					FinalLocalScratchNumBones = Params.NumBones;
+				}
+
+				ConvertComponentPoseToLocalPose(
+					FinalComponentPose.GetData(),
+					FinalLocalScratch.GetData(),
+					Params.NumBones,
+					Params.NumInstances,
+					Params.SlotCapacity,
+					Params.ActiveInstanceIndices,
+					Params.ParentIndices);
+
+				Outputs.FinalPose =
+				{
+					.Data = FinalLocalScratch.GetData(),
+					.PoseType = EGIAG_AnimPinType::LocalPose,
+					.NumBones = Params.NumBones,
+					.SlotCapacity = Params.SlotCapacity,
+				};
+				Outputs.FinalPoseType = EGIAG_AnimPinType::LocalPose;
+				Outputs.FinalLocalPose = Outputs.FinalPose;
+			}
 		}
 	}
 	return Outputs;

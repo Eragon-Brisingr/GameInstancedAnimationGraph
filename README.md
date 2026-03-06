@@ -151,6 +151,32 @@ ispc::GIAG_XXXKernel(
 
 ---
 
+### 第 3.6 步：先确定“节点计算空间契约”（非常重要）
+
+本框架已经支持 `LocalPose` / `ComponentPose` 两种姿态空间，并且是**按 pin 显式声明**：
+
+- pin 类型在 `EGIAG_AnimPinType` 中定义（`LocalPose` / `ComponentPose`）
+- 编译期会在跨空间连线处自动插入 `PoseSpaceConvert` 任务
+
+对自定义节点的规则：
+
+- **节点只做自己声明空间内的计算**，不要在节点内部再写“如果是 local 就转 component”的运行时分支
+- 通过 `GetInputPinType()` / `GetOutputPinType()` 明确声明每个 pose pin 的空间（默认为LocalPose）
+- CPU/GPU 两条路径都要遵守同一个空间契约（公式、分支、边界一致）
+
+典型选择建议：
+
+- 纯混合/叠加/采样类节点：通常用 `LocalPose`
+- IK/LookAt/Attach 这类天然在组件空间更直接的节点：输入/输出直接声明 `ComponentPose`
+- 需要世界空间的节点：先在组件空间算骨骼，再用 `ComponentToWorldBySlot` 转世界，不要把世界空间作为 pose pin 传播
+
+可在 CPU 路径里加契约检查（推荐）：
+
+- `checkf(InPose.PoseType == EGIAG_AnimPinType::ComponentPose, ...)`
+- 这样能尽早暴露节点声明与实现不一致的问题
+
+---
+
 ### 第 4 步：把节点接进图
 
 在你的图类（`UGIAG_AnimGraph` 子类）里：

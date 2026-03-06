@@ -1,0 +1,97 @@
+#include "/Engine/Public/Platform.ush"
+#include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
+
+uint NumBones;
+uint NumInstances;
+uint SourcePoseType;      // 0: LocalPose, 1: ComponentPose
+uint DestinationPoseType; // 0: LocalPose, 1: ComponentPose
+uint DispatchGroupCountX;
+uint DispatchGroupCountY;
+uint DispatchGroupOffset;
+
+StructuredBuffer<uint> ActiveInstanceIndices; // ActiveIndex -> SlotIndex
+StructuredBuffer<int> ParentIndices;
+StructuredBuffer<FGIAG_BoneTRS> SourcePoseTRS;
+RWStructuredBuffer<FGIAG_BoneTRS> RW_DestinationPoseTRS;
+
+FGIAG_BoneTRS GIAG_ReadSourcePose(uint SlotIndex, uint BoneIndex)
+{
+	return SourcePoseTRS[SlotIndex * NumBones + BoneIndex];
+}
+
+FGIAG_BoneTRS GIAG_ConvertComponentToLocal(FGIAG_BoneTRS ComponentBone, FGIAG_BoneTRS ParentComponentBone)
+{
+	// Keep parity with CPU SetToRelativeTransform behavior under accumulated float error.
+	FQuat ParentQuat = GIAG_NormalizeQuat(ParentComponentBone.Rotation);
+	FQuat ComponentQuat = GIAG_NormalizeQuat(ComponentBone.Rotation);
+	FQuat ParentInv = float4(-ParentQuat.x, -ParentQuat.y, -ParentQuat.z, ParentQuat.w);
+	FQuat LocalRot = GIAG_QuatMultiply(ParentInv, ComponentQuat);
+	LocalRot = GIAG_NormalizeQuat(LocalRot);
+
+	float3 DeltaTranslation = ComponentBone.Translation - ParentComponentBone.Translation;
+	float3 LocalTranslation = GIAG_QuatRotateVector(ParentInv, DeltaTranslation) / ParentComponentBone.Scale3D;
+	float3 LocalScale = ComponentBone.Scale3D / ParentComponentBone.Scale3D;
+
+	FGIAG_BoneTRS Result;
+	Result.Rotation = LocalRot;
+	Result.Translation = LocalTranslation;
+	Result.TranslationPad = 0.0;
+	Result.Scale3D = LocalScale;
+	Result.ScalePad = 0.0;
+	return Result;
+}
+
+[numthreads(THREADS_X, THREADS_Y, THREADS_Z)]
+void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	uint GroupLinear =
+		DispatchGroupOffset +
+		GroupId.x +
+		GroupId.y * DispatchGroupCountX +
+		GroupId.z * (DispatchGroupCountX * DispatchGroupCountY);
+	uint DispatchId = GroupLinear * (THREADS_X * THREADS_Y * THREADS_Z) + GroupIndex;
+	uint Total = NumBones * NumInstances;
+	if (DispatchId >= Total)
+	{
+		return;
+	}
+
+	uint ActiveIndex = DispatchId / NumBones;
+	uint BoneIndex = DispatchId - ActiveIndex * NumBones;
+	uint SlotIndex = ActiveInstanceIndices[ActiveIndex];
+
+	uint OutIndex = SlotIndex * NumBones + BoneIndex;
+	FGIAG_BoneTRS SourceBone = GIAG_ReadSourcePose(SlotIndex, BoneIndex);
+
+	if (SourcePoseType == 0u && DestinationPoseType == 1u)
+	{
+		FGIAG_BoneTRS ComponentBone = SourceBone;
+		int Parent = ParentIndices[BoneIndex];
+		while (Parent >= 0)
+		{
+			FGIAG_BoneTRS ParentLocal = GIAG_ReadSourcePose(SlotIndex, (uint)Parent);
+			ComponentBone = GIAG_MultiplyBoneTRS(ComponentBone, ParentLocal);
+			Parent = ParentIndices[(uint)Parent];
+		}
+		RW_DestinationPoseTRS[OutIndex] = ComponentBone;
+		return;
+	}
+
+	if (SourcePoseType == 1u && DestinationPoseType == 0u)
+	{
+		int Parent = ParentIndices[BoneIndex];
+		if (Parent >= 0)
+		{
+			FGIAG_BoneTRS ParentComponent = GIAG_ReadSourcePose(SlotIndex, (uint)Parent);
+			RW_DestinationPoseTRS[OutIndex] = GIAG_ConvertComponentToLocal(SourceBone, ParentComponent);
+		}
+		else
+		{
+			RW_DestinationPoseTRS[OutIndex] = SourceBone;
+		}
+		return;
+	}
+
+	// Contract violation: conversion task should never be emitted for same-space pairs.
+	RW_DestinationPoseTRS[OutIndex] = SourceBone;
+}

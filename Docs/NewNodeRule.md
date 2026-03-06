@@ -16,6 +16,28 @@
 
 ---
 
+## 1.1 计算空间契约（LocalPose / ComponentPose）
+
+框架采用**pin 级空间契约**，不是节点内部“推断空间”：
+
+- Pose pin 类型由 `EGIAG_AnimPinType` 声明（`LocalPose` / `ComponentPose`）
+- 编译期在跨空间连线处自动插入 `PoseSpaceConvert`
+- `FinalPose` 编译后会收敛到 `ComponentPose`
+
+节点实现规范：
+
+- 在 `GetInputPinType()` / `GetOutputPinType()` 中明确声明空间（默认为LocalPose）
+- 节点内部只处理声明空间，不写额外 runtime 空间分支
+- CPU 与 GPU 必须对同一 pin 空间语义完全一致
+
+推荐做法：
+
+- 纯骨骼局部运算（blend/additive/采样）优先 `LocalPose`
+- IK/LookAt/Attach 等依赖全局骨骼关系的运算优先 `ComponentPose`
+- 世界空间计算通过 `ComponentToWorldBySlot` 在节点末端完成，不把 World 作为 pose pin 空间扩散
+
+---
+
 ## 2. 节点文件与注册
 
 新增节点通常需要：
@@ -75,6 +97,12 @@
 - 对 1 输入 1 输出节点，通常先做 Base->Out passthrough，再覆盖目标骨/目标数据。
 - 使用现有公共数学语义（与 shader 保持一致），避免 CPU/GPU 分叉算法。
 
+空间相关补充：
+
+- `FGIAG_CPUPoseBufferView` 带 `PoseType`，建议在入口做 `checkf(InPose.PoseType == 期望类型, ...)`
+- 不要在节点里手动做 Local<->Component 转换来“兼容”错误连线
+- 如节点天然改变空间（少见），应通过 pin 类型表达，让编译器插入/复用转换
+
 ---
 
 ## 6. GPU 路径规范
@@ -88,6 +116,12 @@
   - `ActiveInstanceIndicesSRV`
   - `NeedNodeBitsSRV`
 - 节点 cull 位图语义要兼容 `GIAG_IsNodeNeeded(...)`。
+
+空间相关补充：
+
+- shader 输入输出缓冲区按 pin 空间契约使用，不再引入 `InputPoseType` 之类运行时分支
+- 若需要 `ComponentPose`，直接把 pin 声明为 `ComponentPose`
+- 与 CPU 路径保持同构，避免 CPU/GPU 因空间处理差异造成一致性偏差
 
 ---
 
