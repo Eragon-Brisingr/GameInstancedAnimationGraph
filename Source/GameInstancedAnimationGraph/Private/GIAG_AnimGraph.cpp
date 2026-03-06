@@ -76,6 +76,11 @@ void FGIAG_GraphCullShaderMapPtr::Reset()
 
 namespace
 {
+	static bool NeedsGraphCullCookData(const FGIAG_AnimGraphCompiledData& C)
+	{
+		return C.bEnableNodeCull && C.FinalPoseOutput.NodeIndex >= 0;
+	}
+
 	static uint64 HashGraphForCull(const FGIAG_AnimGraphCompiledData& C)
 	{
 		FSHA1 Sha;
@@ -840,8 +845,7 @@ const FGIAG_AnimGraphCompiledData& UGIAG_AnimGraph::Compile()
 	Script.FriendlyName = GetPathName();
 	Script.BindingVersion = 6;
 
-	const bool bShouldBuildGraphCull = Compiled.bEnableNodeCull && (Compiled.FinalPoseOutput.NodeIndex >= 0);
-	if (bShouldBuildGraphCull)
+	if (NeedsGraphCullCookData(Compiled))
 	{
 		const FString CullHlsl = GenerateGraphCullShaderSource(Compiled);
 		Script.GeneratedHlsl = CullHlsl;
@@ -910,7 +914,7 @@ void UGIAG_AnimGraph::BeginCacheForCookedPlatformData(const ITargetPlatform* Tar
 	Compile();
 
 	// If node culling is disabled (or no supported cull nodes), there is nothing to cook.
-	if (!Compiled.bEnableNodeCull || Compiled.FinalPoseOutput.NodeIndex < 0)
+	if (!NeedsGraphCullCookData(Compiled))
 	{
 		CookedGraphCullShaderMaps.Reset();
 		return;
@@ -962,8 +966,8 @@ void UGIAG_AnimGraph::ClearCachedCookedPlatformData(const ITargetPlatform* Targe
 
 bool UGIAG_AnimGraph::IsCachedCookedPlatformDataLoaded(const ITargetPlatform* TargetPlatform)
 {
-	// If node culling is disabled, no cooked shader data is required.
-	if (!bEnableNodeCull)
+	Compile();
+	if (!NeedsGraphCullCookData(Compiled))
 	{
 		return true;
 	}
