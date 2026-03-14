@@ -20,7 +20,7 @@ struct GAMEINSTANCEDANIMATIONGRAPHNODE_API FGIAG_LookAtSettings
 
 	/** Max angular deviation (degrees) around LookAtAxis. 0 means no clamp. */
 	UPROPERTY(EditAnywhere, Category = "LookAt")
-	float LookAtClamp = 0.0f;
+	float LookAtClamp = 60.0f;
 
 	/** Blend duration for enable/disable transition. */
 	UPROPERTY(EditAnywhere, Category = "LookAt")
