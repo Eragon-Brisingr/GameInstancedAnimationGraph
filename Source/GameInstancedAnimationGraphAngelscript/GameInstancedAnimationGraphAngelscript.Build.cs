@@ -22,7 +22,8 @@ public class GameInstancedAnimationGraphAngelscript : ModuleRules
                 "SlateCore",
                 "AngelscriptCode",
 
-                "GameInstancedAnimationGraph",
+                "GameInstancedAnimationGraph", 
+                "GameInstancedAnimationGraphNode",
             }
         );
     }

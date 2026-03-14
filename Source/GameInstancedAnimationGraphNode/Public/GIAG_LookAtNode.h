@@ -43,6 +43,11 @@ struct alignas(16) GAMEINSTANCEDANIMATIONGRAPHNODE_API FGIAG_LookAtNode final : 
 {
 	GENERATED_BODY()
 public:
+	FGIAG_LookAtNode() = default;
+	FGIAG_LookAtNode(bool bEnable)
+		: RuntimeData{ FVector3f::ZeroVector, 0, bEnable }
+	{}
+	
 	using FNodeMeta = TGIAG_AnimNodeMeta<FGIAG_LookAtNode>;
 	using FSettings = FGIAG_LookAtSettings;
 
