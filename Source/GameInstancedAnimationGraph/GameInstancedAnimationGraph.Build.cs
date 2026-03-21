@@ -33,6 +33,11 @@ public class GameInstancedAnimationGraph : ModuleRules
 				"GameInstancedAnimationGraphShader",
 			});
 
+		if (Target.bBuildEditor)
+		{
+			PrivateDependencyModuleNames.Add("UnrealEd");
+		}
+
 		// Make shader-side shared headers available to ISPC preprocessor (for Shared/GIAG_*.ush).
 		PrivateIncludePaths.Add(Path.Combine(ModuleDirectory, "..", "..", "Shaders", "Common", "Shared"));
 

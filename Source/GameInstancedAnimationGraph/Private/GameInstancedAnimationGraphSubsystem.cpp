@@ -38,6 +38,11 @@
 #include "NiagaraSystem.h"
 #include "Rendering/SkeletalMeshRenderData.h"
 
+#if WITH_EDITOR
+#include "Editor.h"
+#include "LevelEditorViewport.h"
+#endif
+
 DECLARE_STATS_GROUP(TEXT("GameInstancedAnim"), STATGROUP_GameInstancedAnim, STATCAT_Advanced);
 
 static TAutoConsoleVariable<bool> CVar_InstancedAnimEnableCull
@@ -3617,6 +3622,35 @@ void UGameInstancedAnimationGraphSubsystem::Tick(float DeltaTime)
 				}
 			}
 		}
+#if WITH_EDITOR
+		// In SIE, frustum culling should follow the active debug viewport camera.
+		if (UGameViewportClient* GameViewport = World->GetGameViewport())
+		{
+			if (GameViewport->IsSimulateInEditorViewport())
+			{
+				if (FLevelEditorViewportClient* LevelViewportClient = GCurrentLevelEditingViewportClient)
+				{
+					if (LevelViewportClient->IsPerspective() && LevelViewportClient->Viewport)
+					{
+						if (UWorld* ViewportWorld = LevelViewportClient->GetWorld())
+						{
+							if (ViewportWorld == World && ViewportWorld->Scene)
+							{
+								FSceneViewFamilyContext ViewFamily(FSceneViewFamily::ConstructionValues(
+									LevelViewportClient->Viewport,
+									ViewportWorld->Scene,
+									LevelViewportClient->EngineShowFlags).SetRealtimeUpdate(true));
+								if (FSceneView* SceneView = LevelViewportClient->CalcSceneView(&ViewFamily))
+								{
+									GetViewFrustumBounds(ViewFrustum.Emplace(), SceneView->ViewMatrices.GetViewProjectionMatrix(), false);
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+#endif
 	}
 	bEnableFrustumCull = ViewFrustum.IsSet();
 	const float CullPadding = FMath::Max(0.0f, FrustumCullPadding);
