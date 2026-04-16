@@ -646,6 +646,8 @@ private:
 		/** Number of live instances in this bucket (for cleanup). */
 		int32 NumInstances = 0;
 	};
+	
+	float GetCurrentSeconds() const;
 
 	/** Find or create a GraphGroup for (AnimGraph, AnimLibrary). */
 	int32 FindOrCreateGroup(UGIAG_AnimGraph* AnimGraph, USkeleton* Skeleton);

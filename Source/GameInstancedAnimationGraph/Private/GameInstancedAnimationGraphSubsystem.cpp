@@ -283,7 +283,7 @@ void UGameInstancedAnimationGraphSubsystem::OnWorldPreActorTick(UWorld* World, E
 	
 	// Flush deferred Niagara attach meta to RT early in the frame so Niagara ticks can observe updated versions.
 	FlushNiagaraAttachBuckets_GameThread();
-	PrecomputeCpuPoseCache_GameThread((float)World->GetTimeSeconds());
+	PrecomputeCpuPoseCache_GameThread(GetCurrentSeconds());
 }
 
 void UGameInstancedAnimationGraphSubsystem::PrecomputeCpuPoseCache_GameThread(float NowSeconds)
@@ -435,7 +435,7 @@ bool UGameInstancedAnimationGraphSubsystem::EvalCpuAnimationPoseAnyThread(const 
 	FGIAG_AnimGraphCpuRunParams Params;
 	Params.NumBones = Group.NumBones;
 	Params.SlotCapacity = Shard.SlotCapacity;
-	Params.CurrentTimeSeconds = GetWorld() ? (float)GetWorld()->GetTimeSeconds() : 0.0f;
+	Params.CurrentTimeSeconds = GetCurrentSeconds();
 	Params.SkeletalMesh = Rec->SkeletalMesh;
 	Params.Skeleton = Group.Skeleton;
 	Params.ParentIndices = Cache->ParentIndices;
@@ -542,7 +542,7 @@ int32 UGameInstancedAnimationGraphSubsystem::RequestAnimClipIndex(const FGIAG_An
 	check(Group.Compiled);
 	FSkeletonAnimCache* Cache = GetSkeletonCache(Group.SkeletonCacheIndex);
 	check(Cache && Cache->Skeleton == Group.Skeleton);
-	const double NowSeconds = NodeRef.System->GetWorld()->GetTimeSeconds();
+	const double NowSeconds = NodeRef.System->GetCurrentSeconds();
 	const int32 ClipIndex = Rec.CpuProxyActor ? RequestClipIndexOnly(Rec.GroupIndex, AnimSequence, NowSeconds) : RequestClipBake(Rec.GroupIndex, AnimSequence, NowSeconds);
 	return ClipIndex;
 }
@@ -887,6 +887,11 @@ UGameInstancedAnimationGraphSubsystem::FSkeletonAnimCache* UGameInstancedAnimati
 		return nullptr;
 	}
 	return SkeletonCaches[CacheIndex].Get();
+}
+
+float UGameInstancedAnimationGraphSubsystem::GetCurrentSeconds() const
+{
+	return GetWorld()->GetTimeSeconds();
 }
 
 int32 UGameInstancedAnimationGraphSubsystem::FindOrCreateGroup(UGIAG_AnimGraph* AnimGraph, USkeleton* Skeleton)
@@ -2424,7 +2429,7 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterCpuToGpu(const FGameInst
 
 	// Ensure GPU AnimLibrary data exists for any clips referenced by this instance.
 	// (CPU may have allocated clip indices via RequestClipIndexOnly without baking pixels.)
-	const double NowSeconds = GetWorld() ? (double)GetWorld()->GetTimeSeconds() : 0.0;
+	const double NowSeconds = GetCurrentSeconds();
 	FSkeletonAnimCache* Cache = GetSkeletonCache(Group.SkeletonCacheIndex);
 	if (Cache && Cache->Skeleton == Group.Skeleton)
 	{
@@ -3149,7 +3154,7 @@ void UGameInstancedAnimationGraphSubsystem::CleanupUnusedAnimations(float OlderT
 	{
 		return;
 	}
-	const double NowSeconds = GetWorld() ? (double)GetWorld()->GetTimeSeconds() : 0.0;
+	const double NowSeconds = GetCurrentSeconds();
 	const double Threshold = NowSeconds - (double)OlderThanSeconds;
 
 	// Build referenced clip sets per skeleton cache index by scanning live instance node data.
@@ -3595,7 +3600,7 @@ void UGameInstancedAnimationGraphSubsystem::Tick(float DeltaTime)
 	DECLARE_SCOPE_CYCLE_COUNTER(TEXT("UGameInstancedAnimationGraphSubsystem::Tick"), STAT_UGameInstancedAnimSubsystem_Tick, STATGROUP_GameInstancedAnim);
 
 	UWorld* World = GetWorld();
-	const float Now = World ? World->GetTimeSeconds() : 0.0f;
+	const float Now = GetCurrentSeconds();
 
 	FlushNiagaraAttachBuckets_GameThread();
 
