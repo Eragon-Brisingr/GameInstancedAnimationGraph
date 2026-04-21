@@ -262,3 +262,11 @@ uint GIAG_CalcPoseBase(
 	uint Frame = GIAG_CalcFrameIndex(Meta, Playback, CS.Loop);
 	return (uint)Meta.StartTransformIndex + Frame * NumBones;
 }
+
+//------------------------------------------------------------------------------
+// Per-instance TimeSlot support
+//------------------------------------------------------------------------------
+
+#define GIAG_MAX_TIME_SLOTS 16
+
+float GIAG_ReadTimeSlot(float4 InTimeSlots[GIAG_MAX_TIME_SLOTS / 4], uint Idx) { return InTimeSlots[Idx >> 2][Idx & 3]; }

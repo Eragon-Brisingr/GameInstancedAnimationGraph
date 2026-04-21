@@ -18,7 +18,7 @@ struct FGIAG_AnimGraphCpuRunParams
 	int32 NumInstances = 0;  // active count
 	int32 SlotCapacity = 0;  // slot capacity (for CPU we typically pack: SlotCapacity == NumInstances)
 	int32 NumBones = 0;
-	float CurrentTimeSeconds = 0.0f;
+	TConstArrayView<float> TimeSlots;
 
 	USkeletalMesh* SkeletalMesh = nullptr;
 	USkeleton* Skeleton = nullptr;
@@ -31,6 +31,9 @@ struct FGIAG_AnimGraphCpuRunParams
 
 	/** ActiveIndex -> SlotIndex mapping (slot-indexed buffers). Size == NumInstances. */
 	TConstArrayView<uint32> ActiveInstanceIndices;
+
+	/** Per-slot TimeSlotIndex (SlotIndex -> TimeSlot index). Size == SlotCapacity. */
+	TConstArrayView<uint8> TimeSlotIndexBySlot;
 
 	/** Per-slot component transform. Size == SlotCapacity. */
 	TConstArrayView<FTransform> ComponentToWorldBySlot;

@@ -248,6 +248,10 @@ void UGameInstancedAnimationGraphSubsystem::Initialize(FSubsystemCollectionBase&
 	NiagaraAttachRegistry = MakeShared<FGIAG_NiagaraAttachRegistry, ESPMode::ThreadSafe>();
 	NativeAttachRegistry = MakeShared<FGIAG_NativeAttachRegistry, ESPMode::ThreadSafe>();
 
+	// TimeSlot 0 = WorldTime (always allocated).
+	TimeSlotAllocated.Init(false, GIAG_MAX_TIME_SLOTS);
+	TimeSlotAllocated[0] = true;
+
 	// Precompute CPU pose cache before Actor/Component ticks (Anim BP evaluation happens later).
 	PreActorTickHandle = FWorldDelegates::OnWorldPreActorTick.AddUObject(this, &ThisClass::OnWorldPreActorTick);
 
@@ -281,12 +285,14 @@ void UGameInstancedAnimationGraphSubsystem::OnWorldPreActorTick(UWorld* World, E
 	
 	DECLARE_SCOPE_CYCLE_COUNTER(TEXT("UGameInstancedAnimationGraphSubsystem::WorldPreActorTick"), STAT_UGameInstancedAnimSubsystem_WorldPreActorTick, STATGROUP_GameInstancedAnim);
 	
+	TimeSlots[0] = GetWorld()->GetTimeSeconds();
+
 	// Flush deferred Niagara attach meta to RT early in the frame so Niagara ticks can observe updated versions.
 	FlushNiagaraAttachBuckets_GameThread();
-	PrecomputeCpuPoseCache_GameThread(GetCurrentSeconds());
+	PrecomputeCpuPoseCache_GameThread();
 }
 
-void UGameInstancedAnimationGraphSubsystem::PrecomputeCpuPoseCache_GameThread(float NowSeconds)
+void UGameInstancedAnimationGraphSubsystem::PrecomputeCpuPoseCache_GameThread()
 {
 	check(IsInGameThread());
 
@@ -352,7 +358,8 @@ void UGameInstancedAnimationGraphSubsystem::PrecomputeCpuPoseCache_GameThread(fl
 				CpuParams.NumInstances = Shard.CpuAliveSlots.Num();
 				CpuParams.SlotCapacity = Shard.SlotCapacity;
 				CpuParams.NumBones = Group.NumBones;
-				CpuParams.CurrentTimeSeconds = NowSeconds;
+				CpuParams.TimeSlots = MakeArrayView(TimeSlots);
+				CpuParams.TimeSlotIndexBySlot = Shard.TimeSlotIndexBySlot;
 				check(Bucket.SkeletalMesh);
 				CpuParams.SkeletalMesh = Bucket.SkeletalMesh;
 				CpuParams.Skeleton = Group.Skeleton;
@@ -435,7 +442,8 @@ bool UGameInstancedAnimationGraphSubsystem::EvalCpuAnimationPoseAnyThread(const 
 	FGIAG_AnimGraphCpuRunParams Params;
 	Params.NumBones = Group.NumBones;
 	Params.SlotCapacity = Shard.SlotCapacity;
-	Params.CurrentTimeSeconds = GetCurrentSeconds();
+	Params.TimeSlots = MakeArrayView(TimeSlots);
+	Params.TimeSlotIndexBySlot = Shard.TimeSlotIndexBySlot;
 	Params.SkeletalMesh = Rec->SkeletalMesh;
 	Params.Skeleton = Group.Skeleton;
 	Params.ParentIndices = Cache->ParentIndices;
@@ -450,11 +458,13 @@ bool UGameInstancedAnimationGraphSubsystem::EvalCpuAnimationPoseAnyThread(const 
 	// Single-slot pack: evaluate only this instance with SlotCapacity=1 to minimize framework overhead.
 	const int32 SlotIndex = Rec->SlotIndex;
 	const uint32 ActiveSlotU = 0u;
+	const uint8 SingleTimeSlotIndex = Shard.TimeSlotIndexBySlot[SlotIndex];
 
 	FGIAG_AnimGraphCpuRunParams PackedParams = Params;
 	PackedParams.NumInstances = 1;
 	PackedParams.SlotCapacity = 1;
 	PackedParams.ActiveInstanceIndices = TConstArrayView<uint32>(&ActiveSlotU, 1);
+	PackedParams.TimeSlotIndexBySlot = TConstArrayView<uint8>(&SingleTimeSlotIndex, 1);
 
 	const FTransform SingleC2W = Params.ComponentToWorldBySlot[SlotIndex];
 	PackedParams.ComponentToWorldBySlot = TConstArrayView<FTransform>(&SingleC2W, 1);
@@ -542,7 +552,7 @@ int32 UGameInstancedAnimationGraphSubsystem::RequestAnimClipIndex(const FGIAG_An
 	check(Group.Compiled);
 	FSkeletonAnimCache* Cache = GetSkeletonCache(Group.SkeletonCacheIndex);
 	check(Cache && Cache->Skeleton == Group.Skeleton);
-	const double NowSeconds = NodeRef.System->GetCurrentSeconds();
+	const double NowSeconds = NodeRef.System->GetWorldTimeSeconds();
 	const int32 ClipIndex = Rec.CpuProxyActor ? RequestClipIndexOnly(Rec.GroupIndex, AnimSequence, NowSeconds) : RequestClipBake(Rec.GroupIndex, AnimSequence, NowSeconds);
 	return ClipIndex;
 }
@@ -889,9 +899,47 @@ UGameInstancedAnimationGraphSubsystem::FSkeletonAnimCache* UGameInstancedAnimati
 	return SkeletonCaches[CacheIndex].Get();
 }
 
-float UGameInstancedAnimationGraphSubsystem::GetCurrentSeconds() const
+float UGameInstancedAnimationGraphSubsystem::GetWorldTimeSeconds() const
 {
 	return GetWorld()->GetTimeSeconds();
+}
+
+FGIAG_TimeSlot UGameInstancedAnimationGraphSubsystem::AllocateTimeSlot()
+{
+	check(IsInGameThread());
+	for (int32 i = 1; i < GIAG_MAX_TIME_SLOTS; ++i)
+	{
+		if (!TimeSlotAllocated[i])
+		{
+			TimeSlotAllocated[i] = true;
+			TimeSlots[i] = 0.f;
+			return { i };
+		}
+	}
+	checkf(false, TEXT("GIAG: All %d TimeSlots exhausted."), GIAG_MAX_TIME_SLOTS);
+	return FGIAG_TimeSlot::WorldTime();
+}
+
+void UGameInstancedAnimationGraphSubsystem::FreeTimeSlot(FGIAG_TimeSlot Slot)
+{
+	check(IsInGameThread());
+	check(Slot.IsValid() && !Slot.IsWorldTime());
+	check(TimeSlotAllocated[Slot.Index]);
+	TimeSlotAllocated[Slot.Index] = false;
+	TimeSlots[Slot.Index] = 0.f;
+}
+
+void UGameInstancedAnimationGraphSubsystem::SetTimeSlotSeconds(FGIAG_TimeSlot Slot, float Seconds)
+{
+	check(IsInGameThread());
+	check(Slot.IsValid());
+	TimeSlots[Slot.Index] = Seconds;
+}
+
+float UGameInstancedAnimationGraphSubsystem::GetTimeSlotSeconds(FGIAG_TimeSlot Slot) const
+{
+	check(Slot.IsValid());
+	return TimeSlots[Slot.Index];
 }
 
 int32 UGameInstancedAnimationGraphSubsystem::FindOrCreateGroup(UGIAG_AnimGraph* AnimGraph, USkeleton* Skeleton)
@@ -1518,12 +1566,12 @@ void UGameInstancedAnimationGraphSubsystem::CleanupShardIfEmpty(int32 BucketInde
 	Bucket.Shards.RemoveAt(ShardIndex);
 }
 
-FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddInstance(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph, const FTransform& Transform, TSubclassOf<AActor> CpuProxyClass, bool bCpuMode)
+FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddInstance(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph, const FTransform& Transform, TSubclassOf<AActor> CpuProxyClass, bool bCpuMode, FGIAG_TimeSlot TimeSlot)
 {
-	return AddInstance_Internal(SkeletalMesh, AnimGraph, Transform, CpuProxyClass, bCpuMode, /*ExternalCpuProxyActor*/nullptr);
+	return AddInstance_Internal(SkeletalMesh, AnimGraph, Transform, CpuProxyClass, bCpuMode, /*ExternalCpuProxyActor*/nullptr, TimeSlot);
 }
 
-FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddInstance_Internal(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph, const FTransform& Transform, TSubclassOf<AActor> CpuProxyClass, bool bCpuMode, AActor* ExternalCpuProxyActor)
+FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddInstance_Internal(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph, const FTransform& Transform, TSubclassOf<AActor> CpuProxyClass, bool bCpuMode, AActor* ExternalCpuProxyActor, FGIAG_TimeSlot TimeSlot)
 {
 	check(IsInGameThread());
 
@@ -1656,6 +1704,7 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddIns
 	NewRecord.ShardIndex = ShardIndex;
 	NewRecord.GroupIndex = GroupIndex;
 	NewRecord.SlotIndex = SlotIndex;
+	NewRecord.TimeSlotIndex = (uint8)TimeSlot.Index;
 
 	if (AnimRecordSerials.Num() <= RecordIndex)
 	{
@@ -1674,6 +1723,7 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddIns
 		Shard.SlotAlive.Num(), Shard.RecordIndexBySlot.Num(), Shard.SlotCapacity);
 	Shard.RecordIndexBySlot[SlotIndex] = RecordIndex;
 	Shard.SlotAlive[SlotIndex] = true;
+	Shard.TimeSlotIndexBySlot[SlotIndex] = (uint8)TimeSlot.Index;
 	Shard.TransformBySlot[SlotIndex] = Transform;
 	Shard.NewSlotsThisTick.Add((uint32)SlotIndex);
 	if (!Shard.TransformDirty[SlotIndex])
@@ -1724,12 +1774,12 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddIns
 	return Handle;
 }
 
-FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddInstanceWithExternalProxyActor(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph, const FTransform& Transform, AActor* CpuProxyActor)
+FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddInstanceWithExternalProxyActor(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph, const FTransform& Transform, AActor* CpuProxyActor, FGIAG_TimeSlot TimeSlot)
 {
 	USkeletalMeshComponent* SkeletalMeshComponent = IGIAG_ActorInterface::Execute_GetInstancedAnimationSkinnedMesh(CpuProxyActor);
 	check(SkeletalMeshComponent);
 	check(SkeletalMeshComponent->GetSkeletalMeshAsset() == SkeletalMesh);
-	return AddInstance_Internal(SkeletalMesh, AnimGraph, Transform, CpuProxyActor ? CpuProxyActor->GetClass() : nullptr, /*bCpuMode*/true, CpuProxyActor);
+	return AddInstance_Internal(SkeletalMesh, AnimGraph, Transform, CpuProxyActor ? CpuProxyActor->GetClass() : nullptr, /*bCpuMode*/true, CpuProxyActor, TimeSlot);
 }
 
 void UGameInstancedAnimationGraphSubsystem::SetInstanceUseCPUMode(const FGameInstancedAnimationGraphHandle& Handle, bool bUseCPU)
@@ -2429,7 +2479,7 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterCpuToGpu(const FGameInst
 
 	// Ensure GPU AnimLibrary data exists for any clips referenced by this instance.
 	// (CPU may have allocated clip indices via RequestClipIndexOnly without baking pixels.)
-	const double NowSeconds = GetCurrentSeconds();
+	const double NowSeconds = GetWorldTimeSeconds();
 	FSkeletonAnimCache* Cache = GetSkeletonCache(Group.SkeletonCacheIndex);
 	if (Cache && Cache->Skeleton == Group.Skeleton)
 	{
@@ -3154,7 +3204,7 @@ void UGameInstancedAnimationGraphSubsystem::CleanupUnusedAnimations(float OlderT
 	{
 		return;
 	}
-	const double NowSeconds = GetCurrentSeconds();
+	const double NowSeconds = GetWorldTimeSeconds();
 	const double Threshold = NowSeconds - (double)OlderThanSeconds;
 
 	// Build referenced clip sets per skeleton cache index by scanning live instance node data.
@@ -3600,7 +3650,7 @@ void UGameInstancedAnimationGraphSubsystem::Tick(float DeltaTime)
 	DECLARE_SCOPE_CYCLE_COUNTER(TEXT("UGameInstancedAnimationGraphSubsystem::Tick"), STAT_UGameInstancedAnimSubsystem_Tick, STATGROUP_GameInstancedAnim);
 
 	UWorld* World = GetWorld();
-	const float Now = GetCurrentSeconds();
+	TimeSlots[0] = GetWorld()->GetTimeSeconds();
 
 	FlushNiagaraAttachBuckets_GameThread();
 
@@ -3853,7 +3903,8 @@ void UGameInstancedAnimationGraphSubsystem::Tick(float DeltaTime)
 				Params.NumInstances = Shard.GpuActiveInstanceIndices.Num();
 				Params.SlotCapacity = SlotCapacity;
 				Params.NumBones = Group.NumBones;
-				Params.CurrentTimeSeconds = Now;
+				Params.TimeSlots = MakeArrayView(TimeSlots);
+				Params.TimeSlotIndexBySlot = Shard.TimeSlotIndexBySlot;
 				Params.Skeleton = Group.Skeleton;
 				Params.ParentIndices = &Cache->ParentIndices;
 				Params.InverseRefPoseTRS = &Cache->InverseRefPoseTRS;
@@ -3883,7 +3934,7 @@ void UGameInstancedAnimationGraphSubsystem::Tick(float DeltaTime)
 								FGIAG_LocalPoseReadbackRequest Req;
 								Req.RecordIndex = RecordIndex;
 								Req.SerialNumber = *EnabledSerialLocalPose;
-								Req.SlotIndex = SlotU;
+								Req.SlotIndex = (uint32)Slot;
 								Params.DebugLocalPoseReadbackRequests.Add(MoveTemp(Req));
 							}
 						}
@@ -3895,7 +3946,7 @@ void UGameInstancedAnimationGraphSubsystem::Tick(float DeltaTime)
 								FGIAG_NeedNodeBitsReadbackRequest Req;
 								Req.RecordIndex = RecordIndex;
 								Req.SerialNumber = *EnabledSerialNeedBits;
-								Req.SlotIndex = SlotU;
+								Req.SlotIndex = (uint32)Slot;
 								Params.DebugNeedNodeBitsReadbackRequests.Add(MoveTemp(Req));
 							}
 						}

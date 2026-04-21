@@ -29,7 +29,7 @@ namespace
 		BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 			SHADER_PARAMETER(uint32, NumBones)
 			SHADER_PARAMETER(uint32, NumInstances)
-			SHADER_PARAMETER(float, CurrentTimeSeconds)
+			SHADER_PARAMETER_ARRAY(FVector4f, TimeSlots, [GIAG_MAX_TIME_SLOTS / 4])
 			SHADER_PARAMETER(uint32, DispatchGroupCountX)
 			SHADER_PARAMETER(uint32, DispatchGroupCountY)
 			SHADER_PARAMETER(uint32, DispatchGroupOffset)
@@ -39,6 +39,7 @@ namespace
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_ClipMeta>, ClipMetas)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_SlotState>, SlotStates)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint32>, ActiveInstanceIndices)
+			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint32>, TimeSlotIndices)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint32>, NeedNodeBits)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_BoneTRS>, AnimTRS)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_BoneTRS>, RefPoseLocalTRS)
@@ -62,10 +63,11 @@ namespace
 		FRDGBuilder& GraphBuilder,
 		uint32 NumBones,
 		uint32 NumInstances,
-		float CurrentTimeSeconds,
+		TConstArrayView<float> InTimeSlots,
 		FRDGBufferSRVRef ClipMetas,
 		FRDGBufferSRVRef SlotStates,
 		FRDGBufferSRVRef ActiveInstanceIndices,
+		FRDGBufferSRVRef TimeSlotIndicesSRV,
 		FRDGBufferSRVRef NeedNodeBits,
 		uint32 NeedNodeWordsPerSlot,
 		uint32 NodeIndex,
@@ -76,12 +78,13 @@ namespace
 		FGIAG_PoseClipPlayerCS::FParameters* BaseParameters = GraphBuilder.AllocParameters<FGIAG_PoseClipPlayerCS::FParameters>();
 		BaseParameters->NumBones = NumBones;
 		BaseParameters->NumInstances = NumInstances;
-		BaseParameters->CurrentTimeSeconds = CurrentTimeSeconds;
+		GIAG_FillTimeSlotsParameter(BaseParameters->TimeSlots.GetData(), InTimeSlots);
 		BaseParameters->NodeIndex = NodeIndex;
 		BaseParameters->NeedNodeWordsPerSlot = NeedNodeWordsPerSlot;
 		BaseParameters->ClipMetas = ClipMetas;
 		BaseParameters->SlotStates = SlotStates;
 		BaseParameters->ActiveInstanceIndices = ActiveInstanceIndices;
+		BaseParameters->TimeSlotIndices = TimeSlotIndicesSRV;
 		BaseParameters->NeedNodeBits = NeedNodeBits;
 		BaseParameters->AnimTRS = AnimTRS;
 		BaseParameters->RefPoseLocalTRS = RefPoseLocalTRS;
@@ -121,7 +124,7 @@ void FGIAG_ClipPlayerNode::PlayAnimation(const FGIAG_AnimNodeRef& NodeRef, const
 	{
 		return;
 	}
-	const auto NowSeconds = NodeRef.System->GetWorld()->GetTimeSeconds();
+	const auto NowSeconds = NodeRef.GetTimeSlotSeconds();
 
 	const float BlendDur = FMath::Max(0.f, BlendDurationSeconds);
 	if (BlendDur <= 0.f || SlotState.NumClips == 0)
@@ -227,10 +230,11 @@ void FGIAG_ClipPlayerNode::AddPassesGPU(const FGIAG_AnimNodeDispatchContext& Con
 			Context.GraphBuilder,
 			(uint32)Context.NumBones,
 			(uint32)Context.NumInstances,
-			Context.CurrentTimeSeconds,
+			Context.TimeSlots,
 			Context.ClipMetasSRV,
 			Context.NodeParamSRVsPerNode[NodeIndexInBatch],
 			Context.ActiveInstanceIndicesSRV,
+			Context.TimeSlotIndicesSRV,
 			Context.NeedNodeBitsSRV,
 			Context.NeedNodeWordsPerSlot,
 			(uint32)Context.NodeIndices[NodeIndexInBatch],
@@ -342,8 +346,11 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 		check(OutPose.IsValid());
 
 		// Per active slot: evaluate up to 4 clips, then nested-lerp blend (matches shader semantics).
-		for (const int32 SlotIndex : Context.ActiveInstanceIndices)
+		for (const uint32 SlotU : Context.ActiveInstanceIndices)
 		{
+			const int32 SlotIndex = (int32)SlotU;
+			const uint8 TSIdx = (SlotIndex < Context.TimeSlotIndexBySlot.Num()) ? Context.TimeSlotIndexBySlot[SlotIndex] : 0;
+			const float InstanceTime = Context.TimeSlots[TSIdx];
 			check(SlotIndex >= 0 && SlotIndex < Context.SlotCapacity);
 
 			const FGIAG_ClipPlayerNode* Node = Context.GetNodePtrBySlot<FGIAG_ClipPlayerNode>(NodeIdx, SlotIndex);
@@ -363,7 +370,7 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 			// Step 1) Compute blend weights (no pose evaluation needed).
 			const uint32 N = FMath::Min<uint32>(4u, (S.NumClips > 0u) ? S.NumClips : 1u);
 			float W0 = 0.0f, W1 = 0.0f, W2 = 0.0f, W3 = 0.0f;
-			ComputeSlotBlendWeights(Context.CurrentTimeSeconds, S, N, W0, W1, W2, W3);
+			ComputeSlotBlendWeights(InstanceTime, S, N, W0, W1, W2, W3);
 
 			const bool bUse0 = (W0 != 0.0f) && (S.NumClips >= 1u);
 			const bool bUse1 = (W1 != 0.0f) && (S.NumClips >= 2u);
@@ -383,7 +390,7 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 			auto ComputeSampleTimeSeconds = [&](const UAnimSequence* Anim, uint32 ClipSlot) -> float
 			{
 				const float Len = Anim->GetPlayLength();
-				const float Playback = (Context.CurrentTimeSeconds - S.Clips[ClipSlot].StartTime) * S.Clips[ClipSlot].PlayRate + S.Clips[ClipSlot].StartSeconds;
+				const float Playback = (InstanceTime - S.Clips[ClipSlot].StartTime) * S.Clips[ClipSlot].PlayRate + S.Clips[ClipSlot].StartSeconds;
 #if WITH_EDITOR
 				if (GIAG::bQuantTimeInCpuEval)
 				{

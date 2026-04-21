@@ -392,6 +392,44 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 	FRDGBufferSRVRef ActiveIndicesSRV = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(ActiveRDG));
 	Outputs.ActiveInstanceIndicesSRV = ActiveIndicesSRV;
 
+	// TimeSlotIndices: per-slot static mapping (SlotIndex -> TimeSlotIndex).
+	const uint32 SlotCapU = FMath::Max<uint32>(1u, (uint32)Params.SlotCapacity);
+	FRDGBufferRef TimeSlotIdxRDG = CreateOrRegisterExternalBuffer(
+		GraphBuilder,
+		Resources.TimeSlotIndices,
+		FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), SlotCapU),
+		TEXT("GIAG_AG_TimeSlotIndices"));
+
+	{
+		const int32 SrcNum = Params.TimeSlotIndexBySlot.Num();
+		bool bUploadTSI = Resources.TimeSlotIndicesCPU.Num() != SrcNum;
+		if (!bUploadTSI && SrcNum > 0)
+		{
+			bUploadTSI = FMemory::Memcmp(Resources.TimeSlotIndicesCPU.GetData(), Params.TimeSlotIndexBySlot.GetData(), (SIZE_T)SrcNum) != 0;
+		}
+		if (bUploadTSI && SrcNum > 0)
+		{
+			Resources.TimeSlotIndicesCPU.SetNumUninitialized(SrcNum);
+			FMemory::Memcpy(Resources.TimeSlotIndicesCPU.GetData(), Params.TimeSlotIndexBySlot.GetData(), (SIZE_T)SrcNum);
+
+			TArray<uint32, TInlineAllocator<128>> Expanded;
+			Expanded.SetNumUninitialized(SrcNum);
+			for (int32 i = 0; i < SrcNum; ++i) { Expanded[i] = (uint32)Resources.TimeSlotIndicesCPU[i]; }
+
+			CountUpload((uint64)sizeof(uint32) * (uint64)SrcNum);
+			UploadStructuredBuffer(
+				GraphBuilder,
+				TimeSlotIdxRDG,
+				0,
+				TEXT("GIAG_AG_UploadTimeSlotIndices"),
+				sizeof(uint32),
+				Expanded.GetData(),
+				(uint32)SrcNum);
+		}
+	}
+
+	FRDGBufferSRVRef TimeSlotIndicesSRV = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(TimeSlotIdxRDG));
+
 	// ---------------------------------------------------------------------
 	// GPU node culling mask (v2): build per-slot node-needed bitset.
 	// ---------------------------------------------------------------------
@@ -604,7 +642,8 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 		FGIAG_AnimNodeDispatchContext DispatchContext
 		{
 			.GraphBuilder = GraphBuilder,
-			.CurrentTimeSeconds = Params.CurrentTimeSeconds,
+			.TimeSlots = Params.TimeSlots,
+			.TimeSlotIndicesSRV = TimeSlotIndicesSRV,
 			.NumInstances = Params.NumInstances,
 			.NumBones = Params.NumBones,
 			.ParentIndicesSRV = ParentSRV,

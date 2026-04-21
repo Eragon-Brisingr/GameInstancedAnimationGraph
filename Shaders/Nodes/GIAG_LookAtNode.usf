@@ -15,7 +15,7 @@ struct FGIAG_LookAtRuntimeData
 
 uint NumBones;
 uint NumInstances;
-float CurrentTimeSeconds;
+float4 TimeSlots[GIAG_MAX_TIME_SLOTS / 4];
 float BlendDurationSeconds;
 float3 LookAtAxisLocal;
 float LookAtClampDegrees;
@@ -28,18 +28,19 @@ StructuredBuffer<FGIAG_LookAtRuntimeData> NodeParams;
 StructuredBuffer<int> BoneIndexBuffer;
 StructuredBuffer<FGIAG_Transform> WorldToComponentBySlot;
 StructuredBuffer<uint> ActiveInstanceIndices; // ActiveIndex -> SlotIndex
+StructuredBuffer<uint> TimeSlotIndices;       // SlotIndex -> TimeSlotIndex
 StructuredBuffer<uint> NeedNodeBits;
 uint NeedNodeWordsPerSlot;
 uint NodeIndex;
 RWStructuredBuffer<FGIAG_BoneTRS> RW_OutPose;
 
-float GIAG_ComputeEnableAlpha(FGIAG_LookAtRuntimeData RuntimeData)
+float GIAG_ComputeEnableAlpha(FGIAG_LookAtRuntimeData RuntimeData, float InCurrentTimeSeconds)
 {
 	if (BlendDurationSeconds <= 0.0)
 	{
 		return RuntimeData.bEnabled != 0u ? 1.0 : 0.0;
 	}
-	float T = saturate((CurrentTimeSeconds - RuntimeData.LastEnableDisableTimeSeconds) / BlendDurationSeconds);
+	float T = saturate((InCurrentTimeSeconds - RuntimeData.LastEnableDisableTimeSeconds) / BlendDurationSeconds);
 	return RuntimeData.bEnabled != 0u ? T : (1.0 - T);
 }
 
@@ -99,6 +100,8 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 	uint BoneIndex = DispatchId - ActiveIndex * NumBones;
 
 	uint SlotIndex = ActiveInstanceIndices[ActiveIndex];
+	uint TimeSlotIdx = TimeSlotIndices[SlotIndex];
+	float InstanceTime = GIAG_ReadTimeSlot(TimeSlots, TimeSlotIdx);
 	if (NeedNodeWordsPerSlot != 0u && !GIAG_IsNodeNeeded(NeedNodeBits, NeedNodeWordsPerSlot, NodeIndex, SlotIndex))
 	{
 		return;
@@ -114,7 +117,7 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 	}
 
 	FGIAG_LookAtRuntimeData RuntimeData = NodeParams[SlotIndex];
-	const float Alpha = GIAG_ComputeEnableAlpha(RuntimeData);
+	const float Alpha = GIAG_ComputeEnableAlpha(RuntimeData, InstanceTime);
 	if (Alpha <= 0.0)
 	{
 		return;

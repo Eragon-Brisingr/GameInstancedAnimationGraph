@@ -22,7 +22,7 @@ namespace
 		BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 			SHADER_PARAMETER(uint32, NumBones)
 			SHADER_PARAMETER(uint32, NumInstances)
-			SHADER_PARAMETER(float, CurrentTimeSeconds)
+			SHADER_PARAMETER_ARRAY(FVector4f, TimeSlots, [GIAG_MAX_TIME_SLOTS / 4])
 			SHADER_PARAMETER(float, BlendDurationSeconds)
 			SHADER_PARAMETER(FVector3f, LookAtAxisLocal)
 			SHADER_PARAMETER(float, LookAtClampDegrees)
@@ -37,6 +37,7 @@ namespace
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<int>, BoneIndexBuffer)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_Transform>, WorldToComponentBySlot)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint32>, ActiveInstanceIndices)
+			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint32>, TimeSlotIndices)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint32>, NeedNodeBits)
 			SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FGIAG_BoneTRS>, RW_OutPose)
 		END_SHADER_PARAMETER_STRUCT()
@@ -88,7 +89,7 @@ namespace
 		FRDGBuilder& GraphBuilder,
 		uint32 NumBones,
 		uint32 NumInstances,
-		float CurrentTimeSeconds,
+		TConstArrayView<float> InTimeSlots,
 		float BlendDurationSeconds,
 		const FVector3f& LookAtAxisLocal,
 		float LookAtClampDegrees,
@@ -97,6 +98,7 @@ namespace
 		FRDGBufferSRVRef BoneIndexBuffer,
 		FRDGBufferSRVRef WorldToComponentBySlot,
 		FRDGBufferSRVRef ActiveInstanceIndices,
+		FRDGBufferSRVRef TimeSlotIndicesSRV,
 		FRDGBufferSRVRef NeedNodeBits,
 		uint32 NeedNodeWordsPerSlot,
 		uint32 NodeIndex,
@@ -105,7 +107,7 @@ namespace
 		FGIAG_PoseLookAtCS::FParameters* BaseP = GraphBuilder.AllocParameters<FGIAG_PoseLookAtCS::FParameters>();
 		BaseP->NumBones = NumBones;
 		BaseP->NumInstances = NumInstances;
-		BaseP->CurrentTimeSeconds = CurrentTimeSeconds;
+		GIAG_FillTimeSlotsParameter(BaseP->TimeSlots.GetData(), InTimeSlots);
 		BaseP->BlendDurationSeconds = BlendDurationSeconds;
 		BaseP->LookAtAxisLocal = LookAtAxisLocal;
 		BaseP->LookAtClampDegrees = LookAtClampDegrees;
@@ -116,6 +118,7 @@ namespace
 		BaseP->BoneIndexBuffer = BoneIndexBuffer;
 		BaseP->WorldToComponentBySlot = WorldToComponentBySlot;
 		BaseP->ActiveInstanceIndices = ActiveInstanceIndices;
+		BaseP->TimeSlotIndices = TimeSlotIndicesSRV;
 		BaseP->NeedNodeBits = NeedNodeBits;
 		BaseP->RW_OutPose = RW_OutPose;
 
@@ -155,11 +158,9 @@ void FGIAG_LookAtNode::SetEnabled(const FGIAG_AnimNodeRef& NodeRef, bool bNewEna
 	}
 
 	check(NodeRef.System);
-	UWorld* World = NodeRef.System->GetWorld();
-	check(World);
 
 	RuntimeData.bEnabled = NewEnabledValue;
-	RuntimeData.LastEnableDisableTimeSeconds = (float)World->GetTimeSeconds();
+	RuntimeData.LastEnableDisableTimeSeconds = NodeRef.GetTimeSlotSeconds();
 	NodeRef.MarkDirty();
 }
 
@@ -250,7 +251,7 @@ void FGIAG_LookAtNode::AddPassesGPU(const FGIAG_AnimNodeDispatchContext& Context
 			Context.GraphBuilder,
 			(uint32)Context.NumBones,
 			(uint32)Context.NumInstances,
-			Context.CurrentTimeSeconds,
+			Context.TimeSlots,
 			Settings->BlendDurationSeconds,
 			LookAtAxisLocal,
 			Settings->LookAtClamp,
@@ -259,6 +260,7 @@ void FGIAG_LookAtNode::AddPassesGPU(const FGIAG_AnimNodeDispatchContext& Context
 			BoneIndexSRV,
 			Context.WorldToComponentBySlotSRV,
 			Context.ActiveInstanceIndicesSRV,
+			Context.TimeSlotIndicesSRV,
 			Context.NeedNodeBitsSRV,
 			Context.NeedNodeWordsPerSlot,
 			(uint32)Context.NodeIndices[NodeIndexInBatch],
@@ -297,6 +299,8 @@ void FGIAG_LookAtNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& Cont
 
 		for (const int32 SlotIndex : Context.ActiveInstanceIndices)
 		{
+			const uint8 TSIdx = (SlotIndex < Context.TimeSlotIndexBySlot.Num()) ? Context.TimeSlotIndexBySlot[SlotIndex] : 0;
+			const float InstanceTime = Context.TimeSlots[TSIdx];
 			check(SlotIndex >= 0 && SlotIndex < Context.SlotCapacity);
 
 			// Copy input to output first, then overwrite only BoneToModify rotation.
@@ -306,7 +310,7 @@ void FGIAG_LookAtNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& Cont
 				sizeof(FGIAG_BoneTRS) * (SIZE_T)Context.NumBones);
 
 			const FGIAG_LookAtNode* Node = Context.GetNodePtrBySlot<FGIAG_LookAtNode>(NodeIdx, SlotIndex);
-			const float Alpha = ComputeEnableAlpha(Node->RuntimeData, Context.CurrentTimeSeconds, Settings->BlendDurationSeconds);
+			const float Alpha = ComputeEnableAlpha(Node->RuntimeData, InstanceTime, Settings->BlendDurationSeconds);
 			if (Alpha <= 0.0f)
 			{
 				continue;

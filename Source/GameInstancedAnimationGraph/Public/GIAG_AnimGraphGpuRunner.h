@@ -170,6 +170,10 @@ struct FGIAG_AnimGraphPersistentResources
 	TArray<uint32> ActiveInstanceIndicesCPU;
 	uint32 ActiveInstanceIndicesNum = 0;
 
+	/** Per-slot TimeSlotIndex (StructuredBuffer<uint32>, sized SlotCapacity). */
+	TRefCountPtr<FRDGPooledBuffer> TimeSlotIndices;
+	TArray<uint8> TimeSlotIndicesCPU;
+
 	/**
 	 * GPU node culling mask (optional).
 	 * Layout: uint bitset words, packed by (SlotIndex, NodeIndex).
@@ -211,7 +215,7 @@ struct FGIAG_AnimGraphRunParams
 	/** Total slot capacity for this group (stable, allows holes). GPU buffers are sized by SlotCapacity. */
 	int32 SlotCapacity = 0;
 	int32 NumBones = 0;
-	float CurrentTimeSeconds = 0.0f;
+	TConstArrayView<float> TimeSlots;
 
 	/** Source skeleton asset (identity / validation). */
 	USkeleton* Skeleton = nullptr;
@@ -225,6 +229,9 @@ struct FGIAG_AnimGraphRunParams
 
 	/** Optional active instance indices mapping (ActiveIndex -> AbsoluteInstanceIndex). */
 	TArray<uint32> ActiveInstanceIndices;
+
+	/** Per-slot TimeSlotIndex (SlotIndex -> TimeSlot index). Size == SlotCapacity. */
+	TConstArrayView<uint8> TimeSlotIndexBySlot;
 
 	/** Debug: monotonic frame id assigned on GT when this evaluation was submitted. */
 	uint64 DebugCpuRequestFrame = 0;

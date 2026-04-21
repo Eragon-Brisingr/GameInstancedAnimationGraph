@@ -6,7 +6,7 @@
 
 uint NumBones;
 uint NumInstances;
-float CurrentTimeSeconds;
+float4 TimeSlots[GIAG_MAX_TIME_SLOTS / 4];
 uint DispatchGroupCountX;
 uint DispatchGroupCountY;
 uint DispatchGroupOffset;
@@ -15,6 +15,7 @@ StructuredBuffer<FGIAG_ClipMeta> ClipMetas;
 
 StructuredBuffer<FGIAG_SlotState> SlotStates;
 StructuredBuffer<uint> ActiveInstanceIndices; // ActiveIndex -> SlotIndex
+StructuredBuffer<uint> TimeSlotIndices;       // SlotIndex -> TimeSlotIndex
 StructuredBuffer<uint> NeedNodeBits;
 uint NeedNodeWordsPerSlot;
 uint NodeIndex;
@@ -96,6 +97,8 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 	uint BoneIndex = DispatchId - ActiveIndex * NumBones;
 
 	uint SlotIndex = ActiveInstanceIndices[ActiveIndex];
+	uint TimeSlotIdx = TimeSlotIndices[SlotIndex];
+	float InstanceTime = GIAG_ReadTimeSlot(TimeSlots, TimeSlotIdx);
 	uint OutIndex = SlotIndex * NumBones + BoneIndex;
 
 	if (NeedNodeWordsPerSlot != 0u && !GIAG_IsNodeNeeded(NeedNodeBits, NeedNodeWordsPerSlot, NodeIndex, SlotIndex))
@@ -118,7 +121,7 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 		float W1 = 0.0;
 		float W2 = 0.0;
 		float W3 = 0.0;
-		GIAG_ComputeSlotBlendWeights(CurrentTimeSeconds, S, N, W0, W1, W2, W3);
+		GIAG_ComputeSlotBlendWeights(InstanceTime, S, N, W0, W1, W2, W3);
 
 		// Only sample clips that actually contribute.
 		bool bUse0 = (W0 != 0.0) && (S.NumClips >= 1u);
@@ -129,25 +132,25 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 		// Fast-path: single contributing clip -> direct write (no extra loads/math).
 		if (bUse0 && !bUse1 && !bUse2 && !bUse3)
 		{
-			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, CurrentTimeSeconds, S.Clips[0]);
+			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, InstanceTime, S.Clips[0]);
 			RW_OutPose[OutIndex] = AnimTRS[Base + BoneIndex];
 			return;
 		}
 		if (!bUse0 && bUse1 && !bUse2 && !bUse3)
 		{
-			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, CurrentTimeSeconds, S.Clips[1]);
+			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, InstanceTime, S.Clips[1]);
 			RW_OutPose[OutIndex] = AnimTRS[Base + BoneIndex];
 			return;
 		}
 		if (!bUse0 && !bUse1 && bUse2 && !bUse3)
 		{
-			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, CurrentTimeSeconds, S.Clips[2]);
+			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, InstanceTime, S.Clips[2]);
 			RW_OutPose[OutIndex] = AnimTRS[Base + BoneIndex];
 			return;
 		}
 		if (!bUse0 && !bUse1 && !bUse2 && bUse3)
 		{
-			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, CurrentTimeSeconds, S.Clips[3]);
+			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, InstanceTime, S.Clips[3]);
 			RW_OutPose[OutIndex] = AnimTRS[Base + BoneIndex];
 			return;
 		}
@@ -158,22 +161,22 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 		FGIAG_BoneTRS T3 = T0;
 		if (bUse0)
 		{
-			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, CurrentTimeSeconds, S.Clips[0]);
+			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, InstanceTime, S.Clips[0]);
 			T0 = AnimTRS[Base + BoneIndex];
 		}
 		if (bUse1)
 		{
-			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, CurrentTimeSeconds, S.Clips[1]);
+			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, InstanceTime, S.Clips[1]);
 			T1 = AnimTRS[Base + BoneIndex];
 		}
 		if (bUse2)
 		{
-			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, CurrentTimeSeconds, S.Clips[2]);
+			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, InstanceTime, S.Clips[2]);
 			T2 = AnimTRS[Base + BoneIndex];
 		}
 		if (bUse3)
 		{
-			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, CurrentTimeSeconds, S.Clips[3]);
+			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, InstanceTime, S.Clips[3]);
 			T3 = AnimTRS[Base + BoneIndex];
 		}
 

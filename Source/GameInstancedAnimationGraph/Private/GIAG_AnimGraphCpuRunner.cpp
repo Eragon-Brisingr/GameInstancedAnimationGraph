@@ -559,7 +559,8 @@ FGIAG_AnimGraphCpuRunner::FOutputs FGIAG_AnimGraphCpuRunner::Evaluate(
 
 		FGIAG_AnimNodeCpuDispatchContext DispatchContext
 		{
-			.CurrentTimeSeconds = Params.CurrentTimeSeconds,
+			.TimeSlots = Params.TimeSlots,
+			.TimeSlotIndexBySlot = Params.TimeSlotIndexBySlot,
 			.NumInstances = Params.NumInstances,
 			.SlotCapacity = Params.SlotCapacity,
 			.NumBones = Params.NumBones,

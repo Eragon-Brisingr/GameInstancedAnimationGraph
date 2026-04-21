@@ -13,6 +13,7 @@
 #include "GIAG_AnimGraph.h"
 #include "GIAG_AnimGraphGpuRunner.h"
 #include "GIAG_AnimGraphUploadBuilder.h"
+#include "GIAG_TimeSlot.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "GameInstancedAnimationGraphSubsystem.generated.h"
 
@@ -245,11 +246,17 @@ public:
 	void Initialize(FSubsystemCollectionBase& Collection) override;
 	void Deinitialize() override;
 
+	// ---- TimeSlot API ----
+	FGIAG_TimeSlot AllocateTimeSlot();
+	void FreeTimeSlot(FGIAG_TimeSlot Slot);
+	void SetTimeSlotSeconds(FGIAG_TimeSlot Slot, float Seconds);
+	float GetTimeSlotSeconds(FGIAG_TimeSlot Slot) const;
+
 	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim")
-	FGameInstancedAnimationGraphHandle AddInstance(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph, const FTransform& Transform, TSubclassOf<AActor> CpuProxyClass, bool bCpuMode = false);
+	FGameInstancedAnimationGraphHandle AddInstance(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph, const FTransform& Transform, TSubclassOf<AActor> CpuProxyClass, bool bCpuMode = false, FGIAG_TimeSlot TimeSlot = FGIAG_TimeSlot());
 
 	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|CPU")
-	FGameInstancedAnimationGraphHandle AddInstanceWithExternalProxyActor(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph, const FTransform& Transform, AActor* CpuProxyActor);
+	FGameInstancedAnimationGraphHandle AddInstanceWithExternalProxyActor(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph, const FTransform& Transform, AActor* CpuProxyActor, FGIAG_TimeSlot TimeSlot = FGIAG_TimeSlot());
 
 	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim")
 	void RemoveInstance(UPARAM(Ref)FGameInstancedAnimationGraphHandle& Handle);
@@ -365,7 +372,11 @@ protected:
 	FORCEINLINE const UScriptStruct* GetAnimNodeStruct(const FGIAG_AnimNodeRef& AnimNodeRef) const { return Groups[AnimNodeRef.GroupIndex].NodeProperties[AnimNodeRef.NodeIndex]->Struct; }
 private:
 	struct FPrivateUtils;
-	
+
+	// ---- TimeSlot state ----
+	float TimeSlots[GIAG_MAX_TIME_SLOTS] = {};
+	TBitArray<> TimeSlotAllocated;
+
 	UPROPERTY(Transient)
 	TObjectPtr<AActor> HostActor;
 	// Keep GC references to input assets (optional safety).
@@ -516,6 +527,9 @@ private:
 		TBitArray<> SlotAlive;           // size == SlotCapacity
 		TArray<int32> FreeSlots;
 
+		/** Per-slot TimeSlotIndex for per-instance time lookup. Size == SlotCapacity. Default 0 = WorldTime. */
+		TArray<uint8> TimeSlotIndexBySlot;
+
 		/** Per-slot master transform (follow instances do not participate). Size == SlotCapacity. */
 		TArray<FTransform> TransformBySlot;
 		/** Dirty bits for TransformBySlot. Size == SlotCapacity. */
@@ -547,7 +561,6 @@ private:
 		TArray<int32> CpuAliveListIndexBySlot;
 		/** Per-tick active slot lists (frustum-cull filtered from AliveSlots). */
 		TArray<uint32> GpuActiveInstanceIndices;
-		TArray<uint32> CpuActiveInstanceIndices;
 
 		void InitStorage(const FGIAG_AnimGraphCompiledData& CompiledData, TConstArrayView<uint32> InNodeStrideBytes, int32 InSlotCapacity)
 		{
@@ -560,6 +573,8 @@ private:
 			SlotAlive.SetNum(SlotCapacity, false);
 			FreeSlots.Reset();
 			SlotNum = 0;
+
+			TimeSlotIndexBySlot.SetNumZeroed(SlotCapacity);
 
 			TransformBySlot.SetNum(SlotCapacity);
 			for (int32 i = 0; i < SlotCapacity; ++i) { TransformBySlot[i] = FTransform::Identity; }
@@ -601,7 +616,6 @@ private:
 				CpuAliveListIndexBySlot[i] = INDEX_NONE;
 			}
 			GpuActiveInstanceIndices.Reset();
-			CpuActiveInstanceIndices.Reset();
 		}
 
 		FORCEINLINE void MarkNodeParamDirty(int32 NodeIdx, int32 SlotIndex)
@@ -647,7 +661,7 @@ private:
 		int32 NumInstances = 0;
 	};
 	
-	float GetCurrentSeconds() const;
+	float GetWorldTimeSeconds() const;
 
 	/** Find or create a GraphGroup for (AnimGraph, AnimLibrary). */
 	int32 FindOrCreateGroup(UGIAG_AnimGraph* AnimGraph, USkeleton* Skeleton);
@@ -890,6 +904,8 @@ public:
 		/** Stable animation slot index inside the graph-group. */
 		int32 SlotIndex = INDEX_NONE;
 
+		uint8 TimeSlotIndex = 0;
+
 		/** If set, this record is a Follow instance which shares Master's animation instance. */
 		int32 MasterRecordIndex = INDEX_NONE;
 
@@ -914,7 +930,8 @@ public:
 		const FTransform& Transform,
 		TSubclassOf<AActor> CpuProxyClass,
 		bool bCpuMode,
-		AActor* ExternalCpuProxyActor);
+		AActor* ExternalCpuProxyActor,
+		FGIAG_TimeSlot TimeSlot);
 
 	// ---- Backend switching helpers (GT only; master instances only) ----
 	void SwitchMasterGpuToCpu(const FGameInstancedAnimationGraphHandle& Handle, FInstancedAnimRecord* Rec);
@@ -1002,5 +1019,5 @@ private:
 
 	FDelegateHandle PreActorTickHandle;
 	void OnWorldPreActorTick(UWorld* World, ELevelTick TickType, float DeltaSeconds);
-	void PrecomputeCpuPoseCache_GameThread(float NowSeconds);
+	void PrecomputeCpuPoseCache_GameThread();
 };

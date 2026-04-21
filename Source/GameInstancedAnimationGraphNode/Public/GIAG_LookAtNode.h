@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GIAG_AnimNodeBase.h"
+#include "GIAG_TimeSlot.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "GIAG_LookAtNode.generated.h"
 

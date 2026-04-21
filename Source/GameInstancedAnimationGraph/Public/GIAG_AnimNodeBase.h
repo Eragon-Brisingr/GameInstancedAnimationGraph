@@ -142,7 +142,8 @@ struct FGIAG_RDGBoneWeights
 struct FGIAG_AnimNodeDispatchContext
 {
 	FRDGBuilder& GraphBuilder;
-	float CurrentTimeSeconds = 0.0f;
+	TConstArrayView<float> TimeSlots;
+	FRDGBufferSRVRef TimeSlotIndicesSRV = nullptr;
 
 	int32 NumInstances = 0;
 	int32 NumBones = 0;
@@ -229,7 +230,8 @@ struct FGIAG_CPUPoseBufferView
  */
 struct FGIAG_AnimNodeCpuDispatchContext
 {
-	float CurrentTimeSeconds = 0.0f;
+	TConstArrayView<float> TimeSlots;
+	TConstArrayView<uint8> TimeSlotIndexBySlot;
 
 	int32 NumInstances = 0;   // active instance count
 	int32 SlotCapacity = 0;   // slot capacity for this evaluation
@@ -358,7 +360,7 @@ struct FGIAG_AnimNodeCpuCullContext
 };
 
 USTRUCT(BlueprintType, BlueprintInternalUseOnly)
-struct FGIAG_AnimNodeRef
+struct GAMEINSTANCEDANIMATIONGRAPH_API FGIAG_AnimNodeRef
 {
 	GENERATED_BODY()
 
@@ -369,8 +371,9 @@ struct FGIAG_AnimNodeRef
 	int32 ShardIndex = INDEX_NONE;
 	int32 SlotIndex = INDEX_NONE;
 	int32 NodeIndex = INDEX_NONE;
-
-	GAMEINSTANCEDANIMATIONGRAPH_API void MarkDirty() const;
+	
+	void MarkDirty() const;
+	float GetTimeSlotSeconds() const;
 };
 
 template<typename T>

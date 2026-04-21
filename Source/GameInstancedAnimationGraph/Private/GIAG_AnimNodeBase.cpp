@@ -11,6 +11,11 @@ void FGIAG_AnimNodeRef::MarkDirty() const
 	Shard.MarkNodeParamDirty(NodeIndex, SlotIndex);
 }
 
+float FGIAG_AnimNodeRef::GetTimeSlotSeconds() const
+{
+	return System->TimeSlots[System->AnimRecords[RecordIndex].TimeSlotIndex];
+}
+
 IGIAG_AnimNodeMeta::IGIAG_AnimNodeMeta()
 {
 	auto& Manager = FGIAG_AnimNodeMetaManager::Get();
