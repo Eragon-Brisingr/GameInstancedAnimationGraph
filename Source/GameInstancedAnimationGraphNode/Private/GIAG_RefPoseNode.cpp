@@ -82,7 +82,7 @@ namespace
 				ChunkParameters->DispatchGroupOffset = (uint32)GroupOffset1D;
 
 				GraphBuilder.AddPass(
-					RDG_EVENT_NAME("GIAG_PoseRefPose_Chunk"),
+					RDG_EVENT_NAME("GIAG_RefPose"),
 					ChunkParameters,
 					ERDGPassFlags::Compute,
 					[ChunkParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)

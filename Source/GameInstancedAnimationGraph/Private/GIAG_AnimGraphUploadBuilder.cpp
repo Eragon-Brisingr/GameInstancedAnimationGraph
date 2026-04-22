@@ -12,7 +12,8 @@ FGIAG_AnimGraphUploads FGIAG_AnimGraphUploadBuilder::BuildUploads_GameThread(
 	TArray<TArray<uint32>>& InOutDirtyNodeParamSlotsByNode,
 	bool bUploadSkeletonStatic,
 	const TArray<int32>& ParentIndices,
-	const TArray<FGIAG_BoneTRS>& InverseRefPoseTRS)
+	const TArray<FGIAG_BoneTRS>& InverseRefPoseTRS,
+	int32 SlotOffset)
 {
 	FGIAG_AnimGraphUploads Uploads;
 
@@ -20,8 +21,6 @@ FGIAG_AnimGraphUploads FGIAG_AnimGraphUploadBuilder::BuildUploads_GameThread(
 	checkf(NodeData.Num() == CompiledData.NumNodes, TEXT("GIAG: NodeData mismatch (Got=%d Expected=%d)."), NodeData.Num(), CompiledData.NumNodes);
 	checkf(NodeStrideBytes.Num() == CompiledData.NumNodes, TEXT("GIAG: NodeStrideBytes mismatch (Got=%d Expected=%d)."), NodeStrideBytes.Num(), CompiledData.NumNodes);
 	checkf(SlotCapacity > 0, TEXT("GIAG: invalid SlotCapacity."));
-	checkf(Params.SlotCapacity == SlotCapacity, TEXT("GIAG: expected slot capacity to match (Params=%d SlotCapacity=%d)."), Params.SlotCapacity, SlotCapacity);
-	checkf(Params.ActiveInstanceIndices.Num() == Params.NumInstances, TEXT("GIAG: ActiveInstanceIndices mismatch (Active=%d NumInstances=%d)."), Params.ActiveInstanceIndices.Num(), Params.NumInstances);
 
 	if (bUploadSkeletonStatic)
 	{
@@ -93,7 +92,7 @@ FGIAG_AnimGraphUploads FGIAG_AnimGraphUploadBuilder::BuildUploads_GameThread(
 			checkf(Blob != nullptr, TEXT("GIAG: GatherUploadsGPU returned null for dirty node (Node=%d Slot=%d)."), NodeIdx, SlotIndex);
 			checkf(Stride == 0 || Stride == StrideBytes, TEXT("GIAG: GatherUploadsGPU stride mismatch (Node=%d Slot=%d Gather=%u Expected=%u)."), NodeIdx, SlotIndex, Stride, StrideBytes);
 
-			Run.InstanceIndices.Add(SlotU);
+			Run.InstanceIndices.Add(SlotU + (uint32)SlotOffset);
 			FMemory::Memcpy(Dst, Blob, StrideBytes);
 			Dst += StrideBytes;
 		}
@@ -111,4 +110,39 @@ FGIAG_AnimGraphUploads FGIAG_AnimGraphUploadBuilder::BuildUploads_GameThread(
 
 	return Uploads;
 }
+
+void FGIAG_AnimGraphUploadBuilder::MergeUploads(FGIAG_AnimGraphUploads& InOut, FGIAG_AnimGraphUploads&& Other)
+{
+	if (Other.bUploadSkeleton && !InOut.bUploadSkeleton)
+	{
+		InOut.ParentIndices = MoveTemp(Other.ParentIndices);
+		InOut.InverseRefPoseTRS = MoveTemp(Other.InverseRefPoseTRS);
+		InOut.bUploadSkeleton = true;
+	}
+
+	if (InOut.NodeParamStrideBytesByNode.Num() == 0 && Other.NodeParamStrideBytesByNode.Num() > 0)
+	{
+		InOut.NodeParamStrideBytesByNode = MoveTemp(Other.NodeParamStrideBytesByNode);
+	}
+	else if (Other.NodeParamStrideBytesByNode.Num() > 0)
+	{
+		for (int32 i = 0; i < Other.NodeParamStrideBytesByNode.Num() && i < InOut.NodeParamStrideBytesByNode.Num(); ++i)
+		{
+			if (InOut.NodeParamStrideBytesByNode[i] == 0)
+			{
+				InOut.NodeParamStrideBytesByNode[i] = Other.NodeParamStrideBytesByNode[i];
+			}
+		}
+	}
+
+	InOut.NodeRuns.Append(MoveTemp(Other.NodeRuns));
+	InOut.ResourceRuns.Append(MoveTemp(Other.ResourceRuns));
+
+	if (Other.MaxOptionalSRVSlot > InOut.MaxOptionalSRVSlot)
+	{
+		InOut.MaxOptionalSRVSlot = Other.MaxOptionalSRVSlot;
+		InOut.OptionalSRVKeyByNodeBySlot = MoveTemp(Other.OptionalSRVKeyByNodeBySlot);
+	}
+}
+
 

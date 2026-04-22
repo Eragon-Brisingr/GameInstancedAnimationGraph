@@ -138,7 +138,7 @@ namespace
 				P->DispatchGroupOffset = (uint32)GroupOffset1D;
 
 				GraphBuilder.AddPass(
-					RDG_EVENT_NAME("GIAG_PoseLookAt_Chunk"),
+					RDG_EVENT_NAME("GIAG_LookAt"),
 					P,
 					ERDGPassFlags::Compute,
 					[P, CS, GroupCount](FRHIComputeCommandList& RHICmdList)

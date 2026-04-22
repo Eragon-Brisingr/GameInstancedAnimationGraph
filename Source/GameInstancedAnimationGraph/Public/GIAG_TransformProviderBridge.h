@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 
+#include "GIAG_AnimCommon.h"
 #include "GIAG_AnimGraphGpuRunner.h"
 
 /**
@@ -47,6 +48,11 @@ struct FGIAG_TransformProviderState final : public FThreadSafeRefCountedObject
 
 	/** RT-only runner. */
 	FGIAG_AnimGraphGpuRunner* GetRunnerRT() const { return RunnerRT.Get(); }
+
+	/** Shard layout (GT-written, RT-read). */
+	int32 SlotsPerShard = GIAG::DefaultSlotsPerShard;
+	int32 NumShards = 0;
+	int32 GetTotalCapacity() const { return SlotsPerShard * NumShards; }
 
 private:
 	// RT-only.

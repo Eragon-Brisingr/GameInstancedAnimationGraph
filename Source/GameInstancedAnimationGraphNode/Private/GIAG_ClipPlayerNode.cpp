@@ -106,7 +106,7 @@ namespace
 				ChunkParameters->DispatchGroupOffset = (uint32)GroupOffset1D;
 
 				GraphBuilder.AddPass(
-					RDG_EVENT_NAME("GIAG_PoseClipPlayer_Chunk"),
+					RDG_EVENT_NAME("GIAG_ClipPlayer"),
 					ChunkParameters,
 					ERDGPassFlags::Compute,
 					[ChunkParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)

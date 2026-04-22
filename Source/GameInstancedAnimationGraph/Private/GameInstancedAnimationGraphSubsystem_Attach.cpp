@@ -249,8 +249,8 @@ FGameInstancedAnimationAttachHandle UGameInstancedAnimationGraphSubsystem::Attac
 		return {};
 	}
 
-	// GPU backend only; master or follower are both fine as long as they have a shard+slot and provider state.
-	if (Rec->BucketIndex == INDEX_NONE || Rec->ShardIndex == INDEX_NONE || Rec->SlotIndex == INDEX_NONE)
+	// GPU backend only; master or follower are both fine as long as they have a bucket slot and provider state.
+	if (Rec->BucketIndex == INDEX_NONE || Rec->SlotIndex == INDEX_NONE)
 	{
 		return {};
 	}
@@ -259,11 +259,12 @@ FGameInstancedAnimationAttachHandle UGameInstancedAnimationGraphSubsystem::Attac
 		return {};
 	}
 	const FMeshBucket& Bucket = Buckets[Rec->BucketIndex];
-	if (!Bucket.Shards.IsValidIndex(Rec->ShardIndex))
+	const int32 ShardIndex = FMeshBucket::ShardIndexOf(Rec->SlotIndex);
+	if (!Bucket.Shards.IsValidIndex(ShardIndex))
 	{
 		return {};
 	}
-	const FSkinnedShard& Shard = Bucket.Shards[Rec->ShardIndex];
+	const FSkinnedShard& Shard = Bucket.Shards[ShardIndex];
 	if (!Shard.TransformProvider || !Shard.TransformProvider->GetState().IsValid())
 	{
 		return {};
@@ -344,7 +345,7 @@ FGameInstancedAnimationAttachHandle UGameInstancedAnimationGraphSubsystem::Attac
 	Entry.AttachSlot = AttachSlot;
 	Entry.AttachGeneration = AttachGen;
 	Entry.Skeleton = Skeleton;
-	Entry.State = Shard.TransformProvider->GetState().GetReference();
+	Entry.State = Bucket.SharedState.GetReference();
 	Entry.SlotIndex = (uint32)Rec->SlotIndex;
 	Entry.BoneName = BoneName;
 	Entry.BoneIndex = (uint32)ResolvedBoneIndex;

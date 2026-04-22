@@ -162,9 +162,22 @@ struct UGameInstancedAnimationGraphSubsystem::FPrivateUtils
 		NewShard.ISKMC = Common.ISKMC;
 		NewShard.TransformProvider = Common.TransformProvider;
 		NewShard.TransformProvider->AnimationSlotCount = SlotCapacity;
+		NewShard.TransformProvider->ShardIndex = (uint32)NewShardIndex;
+		NewShard.TransformProvider->SetState(InBucket.SharedState.GetReference());
 		NewShard.ISKMC->SetTransformProvider(NewShard.TransformProvider);
 		check(Group.Compiled);
-		NewShard.InitStorage(*Group.Compiled, MakeArrayView(Group.NodeStrideBytes), NewShard.TransformProvider->AnimationSlotCount);
+
+		InBucket.SharedState->NumShards = FMath::Max(InBucket.SharedState->NumShards, NewShardIndex + 1);
+		const int32 NewShardCount = InBucket.SharedState->NumShards;
+		InBucket.TotalSlotCapacity = NewShardCount * GIAG::DefaultSlotsPerShard;
+		if (!InBucket.bStorageInitialized)
+		{
+			InBucket.InitBucketStorage(*Group.Compiled, MakeArrayView(Group.NodeStrideBytes));
+		}
+		else
+		{
+			InBucket.GrowCapacity(NewShardCount, *Group.Compiled, MakeArrayView(Group.NodeStrideBytes));
+		}
 		return NewShardIndex;
 	}
 
@@ -177,7 +190,8 @@ struct UGameInstancedAnimationGraphSubsystem::FPrivateUtils
 		const TRefCountPtr<FGIAG_TransformProviderState>& MasterState,
 		int32 DstNumBones,
 		int32 SrcBones,
-		const TSharedPtr<const TArray<uint32>>& RemapShared)
+		const TSharedPtr<const TArray<uint32>>& RemapShared,
+		int32 MasterShardIndex = 0)
 	{
 		const FSkinnedShardCommonInit Common = CreateSkinnedShardCommon(HostActor, SkeletalMesh);
 		const int32 NewShardIndex = InBucket.Shards.Add(FSkinnedShard());
@@ -185,11 +199,10 @@ struct UGameInstancedAnimationGraphSubsystem::FPrivateUtils
 		NewShard.ISKMC = Common.ISKMC;
 		NewShard.TransformProvider = Common.TransformProvider;
 		NewShard.TransformProvider->AnimationSlotCount = SlotCapacity;
-		NewShard.TransformProvider->ConfigureAsFollower(MasterState.GetReference(), DstNumBones, SrcBones, RemapShared);
+		NewShard.TransformProvider->ShardIndex = (uint32)NewShardIndex;
+		NewShard.TransformProvider->SetState(InBucket.SharedState.GetReference());
+		NewShard.TransformProvider->ConfigureAsFollower(MasterState.GetReference(), DstNumBones, SrcBones, RemapShared, MasterShardIndex);
 		NewShard.ISKMC->SetTransformProvider(NewShard.TransformProvider);
-
-		check(Group.Compiled);
-		NewShard.InitStorage(*Group.Compiled, MakeArrayView(Group.NodeStrideBytes), NewShard.TransformProvider->AnimationSlotCount);
 		return NewShardIndex;
 	}
 
@@ -228,7 +241,7 @@ struct UGameInstancedAnimationGraphSubsystem::FPrivateUtils
 		return Comp;
 	}
 
-	static void DestroyCpuFollowComponent(USkinnedMeshComponent*& InOutComp)
+		static void DestroyCpuFollowComponent(USkinnedMeshComponent*& InOutComp)
 	{
 		check(InOutComp);
 
@@ -236,6 +249,127 @@ struct UGameInstancedAnimationGraphSubsystem::FPrivateUtils
 		InOutComp = nullptr;
 	}
 };
+
+void UGameInstancedAnimationGraphSubsystem::FMeshBucket::InitBucketStorage(
+	const FGIAG_AnimGraphCompiledData& CompiledData, TConstArrayView<uint32> InNodeStrideBytes)
+{
+	check(!bStorageInitialized);
+	bStorageInitialized = true;
+
+	const int32 TotalCap = GetTotalSlotCapacity();
+	check(TotalCap > 0);
+
+	RecordIndexBySlot.SetNum(TotalCap);
+	for (int32 i = 0; i < TotalCap; ++i) { RecordIndexBySlot[i] = INDEX_NONE; }
+	SlotAlive.SetNum(TotalCap, false);
+
+	FreeSlots.Reserve(TotalCap);
+	for (int32 i = TotalCap - 1; i >= 0; --i) { FreeSlots.Add(i); }
+
+	TimeSlotIndexBySlot.SetNumZeroed(TotalCap);
+
+	TransformBySlot.SetNum(TotalCap);
+	for (int32 i = 0; i < TotalCap; ++i) { TransformBySlot[i] = FTransform::Identity; }
+	TransformDirty.SetNum(TotalCap, false);
+	DirtyTransformSlots.Reset();
+	NewSlotsThisTick.Reset();
+
+	const int32 NumNodes = CompiledData.NumNodes;
+	checkf(NumNodes > 0, TEXT("GIAG: invalid CompiledData.NumNodes."));
+	checkf(InNodeStrideBytes.Num() == NumNodes, TEXT("GIAG: NodeStrideBytes mismatch."));
+
+	NodeStorageByNode.SetNum(NumNodes);
+	NodeBasePtrsByNode.SetNum(NumNodes);
+	NodeStrideBytes.SetNum(NumNodes);
+	for (int32 NodeIdx = 0; NodeIdx < NumNodes; ++NodeIdx)
+	{
+		const uint32 Stride = InNodeStrideBytes[NodeIdx];
+		check(Stride > 0 && (Stride % 16u) == 0u);
+		NodeStrideBytes[NodeIdx] = Stride;
+		NodeStorageByNode[NodeIdx].SetNumZeroed((int64)TotalCap * (int64)Stride);
+		NodeBasePtrsByNode[NodeIdx] = NodeStorageByNode[NodeIdx].GetData();
+	}
+
+	NodeParamDirtyBitsByNode.SetNum(NumNodes);
+	DirtyNodeParamSlotsByNode.SetNum(NumNodes);
+	for (int32 NodeIdx = 0; NodeIdx < NumNodes; ++NodeIdx)
+	{
+		NodeParamDirtyBitsByNode[NodeIdx].SetNum(TotalCap, false);
+		DirtyNodeParamSlotsByNode[NodeIdx].Reset();
+	}
+	DirtyNodeMask.SetNum(NumNodes, false);
+	DirtyNodeIndices.Reset();
+
+	GpuAliveSlots.Reset();
+	CpuAliveSlots.Reset();
+	GpuAliveListIndexBySlot.SetNum(TotalCap);
+	CpuAliveListIndexBySlot.SetNum(TotalCap);
+	for (int32 i = 0; i < TotalCap; ++i)
+	{
+		GpuAliveListIndexBySlot[i] = INDEX_NONE;
+		CpuAliveListIndexBySlot[i] = INDEX_NONE;
+	}
+	GpuActiveInstanceIndices.Reset();
+
+	UploadBuilder.Initialize(CompiledData);
+}
+
+void UGameInstancedAnimationGraphSubsystem::FMeshBucket::GrowCapacity(
+	int32 NewShardCount, const FGIAG_AnimGraphCompiledData& CompiledData, TConstArrayView<uint32> InNodeStrideBytes)
+{
+	check(bStorageInitialized);
+	const int32 OldCap = RecordIndexBySlot.Num();
+	const int32 NewCap = NewShardCount * GIAG::DefaultSlotsPerShard;
+	check(NewCap > OldCap);
+
+	RecordIndexBySlot.SetNum(NewCap);
+	for (int32 i = OldCap; i < NewCap; ++i) { RecordIndexBySlot[i] = INDEX_NONE; }
+	SlotAlive.SetNum(NewCap, false);
+
+	for (int32 i = NewCap - 1; i >= OldCap; --i) { FreeSlots.Add(i); }
+
+	TimeSlotIndexBySlot.SetNum(NewCap);
+	for (int32 i = OldCap; i < NewCap; ++i) { TimeSlotIndexBySlot[i] = 0; }
+
+	TransformBySlot.SetNum(NewCap);
+	for (int32 i = OldCap; i < NewCap; ++i) { TransformBySlot[i] = FTransform::Identity; }
+	TransformDirty.SetNum(NewCap, false);
+
+	const int32 NumNodes = CompiledData.NumNodes;
+	checkf(InNodeStrideBytes.Num() == NumNodes, TEXT("GIAG: NodeStrideBytes mismatch (Grow)."));
+	for (int32 NodeIdx = 0; NodeIdx < NumNodes; ++NodeIdx)
+	{
+		const uint32 Stride = InNodeStrideBytes[NodeIdx];
+		const int64 NewBytes = (int64)NewCap * (int64)Stride;
+		NodeStorageByNode[NodeIdx].SetNumZeroed(NewBytes);
+		NodeBasePtrsByNode[NodeIdx] = NodeStorageByNode[NodeIdx].GetData();
+
+		NodeParamDirtyBitsByNode[NodeIdx].SetNum(NewCap, false);
+	}
+
+	GpuAliveListIndexBySlot.SetNum(NewCap);
+	CpuAliveListIndexBySlot.SetNum(NewCap);
+	for (int32 i = OldCap; i < NewCap; ++i)
+	{
+		GpuAliveListIndexBySlot[i] = INDEX_NONE;
+		CpuAliveListIndexBySlot[i] = INDEX_NONE;
+	}
+}
+
+int32 UGameInstancedAnimationGraphSubsystem::FMeshBucket::AllocateSlot()
+{
+	if (FreeSlots.Num() > 0)
+	{
+		return FreeSlots.Pop(EAllowShrinking::No);
+	}
+	return INDEX_NONE;
+}
+
+void UGameInstancedAnimationGraphSubsystem::FMeshBucket::FreeSlot(int32 SlotIndex)
+{
+	check(SlotIndex >= 0 && SlotIndex < GetTotalSlotCapacity());
+	FreeSlots.Add(SlotIndex);
+}
 
 void UGameInstancedAnimationGraphSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -314,85 +448,74 @@ void UGameInstancedAnimationGraphSubsystem::PrecomputeCpuPoseCache_GameThread()
 			FMeshBucket& Bucket = Buckets[BucketIndex];
 			check(Bucket.GroupIndex == GroupIndex);
 
-			for (auto ShardIt = Bucket.Shards.CreateIterator(); ShardIt; ++ShardIt)
+			if (!Bucket.bStorageInitialized || Bucket.CpuAliveSlots.Num() <= 0)
 			{
-				FSkinnedShard& Shard = *ShardIt;
+				continue;
+			}
 
-				// Follower shard does not evaluate.
-				if (Shard.TransformProvider && Shard.TransformProvider->GetMode() == EGIAG_TransformProviderMode::FollowerCopyOrRemap)
+			// Sync per-slot transforms from CpuProxyActors.
+			for (const uint32 SlotU : Bucket.CpuAliveSlots)
+			{
+				const int32 SlotIndex = (int32)SlotU;
+				const int32 RecordIndex = Bucket.RecordIndexBySlot[SlotIndex];
+				check(RecordIndex != INDEX_NONE && AnimRecords.IsValidIndex(RecordIndex));
+				const FInstancedAnimRecord& Rec = AnimRecords[RecordIndex];
+				check(Rec.MasterRecordIndex == INDEX_NONE);
+				check(Rec.CpuProxyActor);
+
+				if (USkeletalMeshComponent* Skinned = IGIAG_ActorInterface::Execute_GetInstancedAnimationSkinnedMesh(Rec.CpuProxyActor))
 				{
-					continue;
+					Bucket.TransformBySlot[SlotIndex] = Skinned->GetComponentTransform();
 				}
-
-				if (Shard.CpuAliveSlots.Num() <= 0)
+				else
 				{
-					continue;
+					Bucket.TransformBySlot[SlotIndex] = Rec.CpuProxyActor->GetActorTransform();
 				}
+			}
 
-				// Sync per-slot transforms from CpuProxyActors.
-				for (const uint32 SlotU : Shard.CpuAliveSlots)
+			if (!Group.CpuRunner)
+			{
+				Group.CpuRunner = MakeUnique<FGIAG_AnimGraphCpuRunner>();
+			}
+
+			FGIAG_AnimGraphCpuRunParams CpuParams;
+			CpuParams.NumInstances = Bucket.CpuAliveSlots.Num();
+			CpuParams.SlotCapacity = Bucket.GetTotalSlotCapacity();
+			CpuParams.NumBones = Group.NumBones;
+			CpuParams.TimeSlots = MakeArrayView(TimeSlots);
+			CpuParams.TimeSlotIndexBySlot = Bucket.TimeSlotIndexBySlot;
+			check(Bucket.SkeletalMesh);
+			CpuParams.SkeletalMesh = Bucket.SkeletalMesh;
+			CpuParams.Skeleton = Group.Skeleton;
+			CpuParams.ParentIndices = Cache->ParentIndices;
+			CpuParams.RefPoseLocal = Cache->RefPoseLocal;
+			CpuParams.ActiveInstanceIndices = Bucket.CpuAliveSlots;
+			CpuParams.ComponentToWorldBySlot = Bucket.TransformBySlot;
+			CpuParams.AnimSequencesByClipIndex = Cache->ClipIndexToSequence;
+			CpuParams.NodeData = MakeArrayView(
+				reinterpret_cast<const uint8* const*>(Bucket.NodeBasePtrsByNode.GetData()),
+				Bucket.NodeBasePtrsByNode.Num());
+			CpuParams.NodeStrideBytes = Bucket.NodeStrideBytes;
+			CpuParams.RequestedFinalPoseType = EGIAG_AnimPinType::LocalPose;
+
+			const FGIAG_AnimGraphCpuRunner::FOutputs Outputs = Group.CpuRunner->Evaluate(*Group.Compiled, CpuParams);
+			check(Outputs.FinalLocalPose.IsValid());
+
+			for (const uint32 SlotU : Bucket.CpuAliveSlots)
+			{
+				const int32 SlotIndex = (int32)SlotU;
+				const int32 RecordIndex = Bucket.RecordIndexBySlot[SlotIndex];
+				check(RecordIndex != INDEX_NONE && AnimRecords.IsValidIndex(RecordIndex));
+
+				FCpuPoseCacheEntry& Entry = CpuPoseCacheByRecordIndex.FindOrAdd(RecordIndex);
+				Entry.Frame = Frame;
+				Entry.SerialNumber = AnimRecordSerials[RecordIndex];
+				Entry.NumBones = Group.NumBones;
+				Entry.LocalPose.SetNum(Group.NumBones, EAllowShrinking::No);
+
+				for (int32 BoneIndex = 0; BoneIndex < Group.NumBones; ++BoneIndex)
 				{
-					const int32 Slot = (int32)SlotU;
-					const int32 RecordIndex = Shard.RecordIndexBySlot[Slot];
-					check(RecordIndex != INDEX_NONE && AnimRecords.IsValidIndex(RecordIndex));
-					const FInstancedAnimRecord& Rec = AnimRecords[RecordIndex];
-					check(Rec.MasterRecordIndex == INDEX_NONE);
-					check(Rec.CpuProxyActor);
-
-					if (USkeletalMeshComponent* Skinned = IGIAG_ActorInterface::Execute_GetInstancedAnimationSkinnedMesh(Rec.CpuProxyActor))
-					{
-						Shard.TransformBySlot[Slot] = Skinned->GetComponentTransform();
-					}
-					else
-					{
-						Shard.TransformBySlot[Slot] = Rec.CpuProxyActor->GetActorTransform();
-					}
-				}
-
-				if (!Group.CpuRunner)
-				{
-					Group.CpuRunner = MakeUnique<FGIAG_AnimGraphCpuRunner>();
-				}
-
-				FGIAG_AnimGraphCpuRunParams CpuParams;
-				CpuParams.NumInstances = Shard.CpuAliveSlots.Num();
-				CpuParams.SlotCapacity = Shard.SlotCapacity;
-				CpuParams.NumBones = Group.NumBones;
-				CpuParams.TimeSlots = MakeArrayView(TimeSlots);
-				CpuParams.TimeSlotIndexBySlot = Shard.TimeSlotIndexBySlot;
-				check(Bucket.SkeletalMesh);
-				CpuParams.SkeletalMesh = Bucket.SkeletalMesh;
-				CpuParams.Skeleton = Group.Skeleton;
-				CpuParams.ParentIndices = Cache->ParentIndices;
-				CpuParams.RefPoseLocal = Cache->RefPoseLocal;
-				CpuParams.ActiveInstanceIndices = Shard.CpuAliveSlots;
-				CpuParams.ComponentToWorldBySlot = Shard.TransformBySlot;
-				CpuParams.AnimSequencesByClipIndex = Cache->ClipIndexToSequence;
-				CpuParams.NodeData = MakeArrayView(
-					reinterpret_cast<const uint8* const*>(Shard.NodeBasePtrsByNode.GetData()),
-					Shard.NodeBasePtrsByNode.Num());
-				CpuParams.NodeStrideBytes = Shard.NodeStrideBytes;
-				CpuParams.RequestedFinalPoseType = EGIAG_AnimPinType::LocalPose;
-
-				const FGIAG_AnimGraphCpuRunner::FOutputs Outputs = Group.CpuRunner->Evaluate(*Group.Compiled, CpuParams);
-				check(Outputs.FinalLocalPose.IsValid());
-
-				for (const uint32 SlotU : Shard.CpuAliveSlots)
-				{
-					const int32 Slot = (int32)SlotU;
-					const int32 RecordIndex = Shard.RecordIndexBySlot[Slot];
-					check(RecordIndex != INDEX_NONE && AnimRecords.IsValidIndex(RecordIndex));
-
-					FCpuPoseCacheEntry& Entry = CpuPoseCacheByRecordIndex.FindOrAdd(RecordIndex);
-					Entry.Frame = Frame;
-					Entry.SerialNumber = AnimRecordSerials[RecordIndex];
-					Entry.NumBones = Group.NumBones;
-					Entry.LocalPose.SetNum(Group.NumBones, EAllowShrinking::No);
-
-					for (int32 BoneIndex = 0; BoneIndex < Group.NumBones; ++BoneIndex)
-					{
-						Entry.LocalPose[BoneIndex] = Outputs.FinalLocalPose.At(Slot, BoneIndex);
-					}
+					Entry.LocalPose[BoneIndex] = Outputs.FinalLocalPose.At(SlotIndex, BoneIndex);
 				}
 			}
 		}
@@ -434,31 +557,30 @@ bool UGameInstancedAnimationGraphSubsystem::EvalCpuAnimationPoseAnyThread(const 
 
 	checkf(Buckets.IsValidIndex(Rec->BucketIndex), TEXT("GIAG CPU: invalid BucketIndex=%d."), Rec->BucketIndex);
 	const FMeshBucket& Bucket = Buckets[Rec->BucketIndex];
-	checkf(Bucket.Shards.IsValidIndex(Rec->ShardIndex), TEXT("GIAG CPU: invalid ShardIndex=%d (BucketIndex=%d)."), Rec->ShardIndex, Rec->BucketIndex);
-	const FSkinnedShard& Shard = Bucket.Shards[Rec->ShardIndex];
-	check(Rec->SlotIndex >= 0 && Rec->SlotIndex < Shard.SlotCapacity);
+	check(Bucket.bStorageInitialized);
+	const int32 BucketSlot = Rec->SlotIndex;
+	check(BucketSlot >= 0 && BucketSlot < Bucket.GetTotalSlotCapacity());
 
-	// Base params (slot-capacity evaluation view into the shard).
+	// Base params (slot-capacity evaluation view into the bucket).
 	FGIAG_AnimGraphCpuRunParams Params;
 	Params.NumBones = Group.NumBones;
-	Params.SlotCapacity = Shard.SlotCapacity;
+	Params.SlotCapacity = Bucket.GetTotalSlotCapacity();
 	Params.TimeSlots = MakeArrayView(TimeSlots);
-	Params.TimeSlotIndexBySlot = Shard.TimeSlotIndexBySlot;
+	Params.TimeSlotIndexBySlot = Bucket.TimeSlotIndexBySlot;
 	Params.SkeletalMesh = Rec->SkeletalMesh;
 	Params.Skeleton = Group.Skeleton;
 	Params.ParentIndices = Cache->ParentIndices;
 	Params.RefPoseLocal = Cache->RefPoseLocal;
-	Params.ComponentToWorldBySlot = Shard.TransformBySlot;
+	Params.ComponentToWorldBySlot = Bucket.TransformBySlot;
 	Params.AnimSequencesByClipIndex = Cache->ClipIndexToSequence;
 	Params.NodeData = MakeArrayView(
-		reinterpret_cast<const uint8* const*>(Shard.NodeBasePtrsByNode.GetData()),
-		Shard.NodeBasePtrsByNode.Num());
-	Params.NodeStrideBytes = Shard.NodeStrideBytes;
+		reinterpret_cast<const uint8* const*>(Bucket.NodeBasePtrsByNode.GetData()),
+		Bucket.NodeBasePtrsByNode.Num());
+	Params.NodeStrideBytes = Bucket.NodeStrideBytes;
 
 	// Single-slot pack: evaluate only this instance with SlotCapacity=1 to minimize framework overhead.
-	const int32 SlotIndex = Rec->SlotIndex;
 	const uint32 ActiveSlotU = 0u;
-	const uint8 SingleTimeSlotIndex = Shard.TimeSlotIndexBySlot[SlotIndex];
+	const uint8 SingleTimeSlotIndex = Bucket.TimeSlotIndexBySlot[BucketSlot];
 
 	FGIAG_AnimGraphCpuRunParams PackedParams = Params;
 	PackedParams.NumInstances = 1;
@@ -466,7 +588,7 @@ bool UGameInstancedAnimationGraphSubsystem::EvalCpuAnimationPoseAnyThread(const 
 	PackedParams.ActiveInstanceIndices = TConstArrayView<uint32>(&ActiveSlotU, 1);
 	PackedParams.TimeSlotIndexBySlot = TConstArrayView<uint8>(&SingleTimeSlotIndex, 1);
 
-	const FTransform SingleC2W = Params.ComponentToWorldBySlot[SlotIndex];
+	const FTransform SingleC2W = Params.ComponentToWorldBySlot[BucketSlot];
 	PackedParams.ComponentToWorldBySlot = TConstArrayView<FTransform>(&SingleC2W, 1);
 	PackedParams.RequestedFinalPoseType = EGIAG_AnimPinType::LocalPose;
 
@@ -475,7 +597,7 @@ bool UGameInstancedAnimationGraphSubsystem::EvalCpuAnimationPoseAnyThread(const 
 	for (int32 NodeIdx = 0; NodeIdx < Params.NodeData.Num(); ++NodeIdx)
 	{
 		const uint32 Stride = Params.NodeStrideBytes[NodeIdx];
-		PackedNodeData[NodeIdx] = Params.NodeData[NodeIdx] + (int64)Stride * (int64)SlotIndex;
+		PackedNodeData[NodeIdx] = Params.NodeData[NodeIdx] + (int64)Stride * (int64)BucketSlot;
 	}
 	PackedParams.NodeData = PackedNodeData;
 
@@ -577,13 +699,11 @@ void* UGameInstancedAnimationGraphSubsystem::FindAnimNodeImpl(const FGameInstanc
 	OutNodeRef.RecordIndex = Handle.RecordIndex;
 	OutNodeRef.GroupIndex = Rec->GroupIndex;
 	OutNodeRef.BucketIndex = Rec->BucketIndex;
-	OutNodeRef.ShardIndex = Rec->ShardIndex;
 	OutNodeRef.SlotIndex = Rec->SlotIndex;
 	OutNodeRef.NodeIndex = NodeIdx;
 
 	FMeshBucket& Bucket = OutNodeRef.System->Buckets[Rec->BucketIndex];
-	FSkinnedShard& Shard = Bucket.Shards[Rec->ShardIndex];
-	return Shard.GetNodePtr(NodeIdx, Rec->SlotIndex);
+	return Bucket.GetNodePtr(NodeIdx, Rec->SlotIndex);
 }
 
 namespace PrivateAccess
@@ -1441,10 +1561,13 @@ int32 UGameInstancedAnimationGraphSubsystem::FindOrCreateBucket(USkeletalMesh* S
 	Bucket.BoundSphereRadius = SkeletalMesh->GetBounds().SphereRadius;
 	Bucket.GroupIndex = GroupIndex;
 
+	// Shared provider state for unified computation across all shards in this bucket.
+	Bucket.SharedState = TRefCountPtr<FGIAG_TransformProviderState>(new FGIAG_TransformProviderState());
+	Bucket.SharedState->SlotsPerShard = GIAG::DefaultSlotsPerShard;
+
 	// Create initial shard.
-		FPrivateUtils::AddDefaultShardToBucket(Bucket, Group, *HostActor, *SkeletalMesh, DefaultSlotsPerShard);
+	FPrivateUtils::AddDefaultShardToBucket(Bucket, Group, *HostActor, *SkeletalMesh, GIAG::DefaultSlotsPerShard);
 	check(Bucket.Shards.Num() > 0);
-	Bucket.Shards[0].UploadBuilder.Initialize(*Group.Compiled);
 
 	const int32 NewBucketIndex = Buckets.Add(MoveTemp(Bucket));
 	BucketByKey.Add(Key, NewBucketIndex);
@@ -1551,9 +1674,18 @@ void UGameInstancedAnimationGraphSubsystem::CleanupShardIfEmpty(int32 BucketInde
 	FMeshBucket& Bucket = Buckets[BucketIndex];
 	check(Bucket.Shards.IsValidIndex(ShardIndex));
 	FSkinnedShard& Shard = Bucket.Shards[ShardIndex];
-	if (Shard.NumInstances > 0 || Shard.GpuAliveSlots.Num() > 0 || Shard.CpuAliveSlots.Num() > 0)
+	if (Shard.NumInstances > 0)
 	{
 		return;
+	}
+	const int32 Base = ShardIndex * GIAG::DefaultSlotsPerShard;
+	for (int32 L = 0; L < GIAG::DefaultSlotsPerShard; ++L)
+	{
+		const int32 G = Base + L;
+		if (Bucket.SlotAlive.IsValidIndex(G) && Bucket.SlotAlive[G])
+		{
+			return;
+		}
 	}
 
 	if (Shard.ISKMC)
@@ -1629,50 +1761,16 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddIns
 	check(Buckets.IsValidIndex(BucketIndex));
 	FMeshBucket* Bucket = &Buckets[BucketIndex];
 
-	// Allocate slot in a shard (<=127 slots each). AnimationIndex == SlotIndex.
-	auto AllocateSlot = [&](FSkinnedShard& Shard) -> int32
+	int32 AllocatedSlot = Bucket->AllocateSlot();
+	if (AllocatedSlot == INDEX_NONE)
 	{
-		if (Shard.FreeSlots.Num() > 0)
-		{
-			const int32 Slot = Shard.FreeSlots.Pop(EAllowShrinking::No);
-			return Slot;
-		}
-		if (Shard.SlotNum < Shard.SlotCapacity)
-		{
-			return Shard.SlotNum++;
-		}
-		return INDEX_NONE;
-	};
+		FPrivateUtils::AddDefaultShardToBucket(*Bucket, Group, *HostActor, *SkeletalMesh, GIAG::DefaultSlotsPerShard);
+		AllocatedSlot = Bucket->AllocateSlot();
+	}
+	check(AllocatedSlot != INDEX_NONE);
 
-	int32 ShardIndex = INDEX_NONE;
-	int32 SlotIndex = INDEX_NONE;
-	for (auto ShardIt = Bucket->Shards.CreateIterator(); ShardIt; ++ShardIt)
-	{
-		const int32 Idx = ShardIt.GetIndex();
-		FSkinnedShard& Shard = *ShardIt;
-		if (Shard.NodeStorageByNode.Num() == 0)
-		{
-			check(Shard.TransformProvider);
-			check(Group.Compiled);
-			Shard.InitStorage(*Group.Compiled, MakeArrayView(Group.NodeStrideBytes), Shard.TransformProvider->AnimationSlotCount);
-			Shard.UploadBuilder.Initialize(*Group.Compiled);
-		}
-		const int32 Slot = AllocateSlot(Shard);
-		if (Slot != INDEX_NONE)
-		{
-			ShardIndex = Idx;
-			SlotIndex = Slot;
-			break;
-		}
-	}
-	if (ShardIndex == INDEX_NONE)
-	{
-		ShardIndex = FPrivateUtils::AddDefaultShardToBucket(*Bucket, Group, *HostActor, *SkeletalMesh, DefaultSlotsPerShard);
-		check(Bucket->Shards.IsValidIndex(ShardIndex));
-		Bucket->Shards[ShardIndex].UploadBuilder.Initialize(*Group.Compiled);
-		SlotIndex = AllocateSlot(Bucket->Shards[ShardIndex]);
-	}
-	check(ShardIndex != INDEX_NONE && SlotIndex != INDEX_NONE);
+	const int32 ShardIndex = FMeshBucket::ShardIndexOf(AllocatedSlot);
+	const int32 ShardSlot = FMeshBucket::ShardSlotOf(AllocatedSlot);
 
 	check(Bucket->Shards.IsValidIndex(ShardIndex));
 	FSkinnedShard& Shard = Bucket->Shards[ShardIndex];
@@ -1689,7 +1787,7 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddIns
 		const FStructProperty* SP = Group.NodeProperties[NodeIdx];
 		check(SP && SP->Struct);
 
-		uint8* NodePtr = Shard.GetNodePtr(NodeIdx, SlotIndex);
+		uint8* NodePtr = Bucket->GetNodePtr(NodeIdx, AllocatedSlot);
 		SP->Struct->InitializeStruct(NodePtr);
 		SP->Struct->CopyScriptStruct(NodePtr, Group.NodeProperties[NodeIdx]->ContainerPtrToValuePtr<void>(DefaultGraphInstance.GetMemory()));
 		Node.NodeMeta->InitInstanceData(NodePtr);
@@ -1701,9 +1799,8 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddIns
 	NewRecord.SkeletalMesh = SkeletalMesh;
 	NewRecord.CpuProxyClass = CpuProxyClass;
 	NewRecord.BucketIndex = BucketIndex;
-	NewRecord.ShardIndex = ShardIndex;
 	NewRecord.GroupIndex = GroupIndex;
-	NewRecord.SlotIndex = SlotIndex;
+	NewRecord.SlotIndex = AllocatedSlot;
 	NewRecord.TimeSlotIndex = (uint8)TimeSlot.Index;
 
 	if (AnimRecordSerials.Num() <= RecordIndex)
@@ -1717,25 +1814,25 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddIns
 	Handle.SerialNumber = Serial;
 
 	Bucket->NumInstances++;
-	checkf(SlotIndex >= 0 && SlotIndex < Shard.SlotCapacity, TEXT("GIAG: invalid SlotIndex=%d."), SlotIndex);
-	checkf(Shard.SlotAlive.Num() == Shard.SlotCapacity && Shard.RecordIndexBySlot.Num() == Shard.SlotCapacity,
-		TEXT("GIAG: shard slot arrays size mismatch (SlotAlive=%d RecordIndexBySlot=%d Cap=%d)."),
-		Shard.SlotAlive.Num(), Shard.RecordIndexBySlot.Num(), Shard.SlotCapacity);
-	Shard.RecordIndexBySlot[SlotIndex] = RecordIndex;
-	Shard.SlotAlive[SlotIndex] = true;
-	Shard.TimeSlotIndexBySlot[SlotIndex] = (uint8)TimeSlot.Index;
-	Shard.TransformBySlot[SlotIndex] = Transform;
-	Shard.NewSlotsThisTick.Add((uint32)SlotIndex);
-	if (!Shard.TransformDirty[SlotIndex])
+	checkf(AllocatedSlot >= 0 && AllocatedSlot < Bucket->GetTotalSlotCapacity(), TEXT("GIAG: invalid SlotIndex=%d."), AllocatedSlot);
+	checkf(Bucket->SlotAlive.Num() == Bucket->GetTotalSlotCapacity() && Bucket->RecordIndexBySlot.Num() == Bucket->GetTotalSlotCapacity(),
+		TEXT("GIAG: bucket slot arrays size mismatch (SlotAlive=%d RecordIndexBySlot=%d Cap=%d)."),
+		Bucket->SlotAlive.Num(), Bucket->RecordIndexBySlot.Num(), Bucket->GetTotalSlotCapacity());
+	Bucket->RecordIndexBySlot[AllocatedSlot] = RecordIndex;
+	Bucket->SlotAlive[AllocatedSlot] = true;
+	Bucket->TimeSlotIndexBySlot[AllocatedSlot] = (uint8)TimeSlot.Index;
+	Bucket->TransformBySlot[AllocatedSlot] = Transform;
+	Bucket->NewSlotsThisTick.Add((uint32)AllocatedSlot);
+	if (!Bucket->TransformDirty[AllocatedSlot])
 	{
-		Shard.TransformDirty[SlotIndex] = true;
-		Shard.DirtyTransformSlots.Add((uint32)SlotIndex);
+		Bucket->TransformDirty[AllocatedSlot] = true;
+		Bucket->DirtyTransformSlots.Add((uint32)AllocatedSlot);
 	}
 
 	// Force initial GPU param upload for all nodes on this slot (event-driven; no per-frame scan).
 	for (int32 NodeIdx = 0; NodeIdx < Group.Compiled->NumNodes; ++NodeIdx)
 	{
-		Shard.MarkNodeParamDirty(NodeIdx, SlotIndex);
+		Bucket->MarkNodeParamDirty(NodeIdx, AllocatedSlot);
 	}
 
 	// Create backend:
@@ -1744,18 +1841,18 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddIns
 	if (!bCpuMode)
 	{
 		check(Shard.ISKMC);
-		const FPrimitiveInstanceId InstanceId = Shard.ISKMC->AddInstance(Transform, SlotIndex, true);
+		const FPrimitiveInstanceId InstanceId = Shard.ISKMC->AddInstance(Transform, ShardSlot, true);
 		Shard.NumInstances += 1;
 		NewRecord.ISKMC = Shard.ISKMC;
 		NewRecord.InstanceId = InstanceId;
-		FPrivateUtils::AddSlotToList(Shard.GpuAliveSlots, Shard.GpuAliveListIndexBySlot, SlotIndex);
+		FPrivateUtils::AddSlotToList(Bucket->GpuAliveSlots, Bucket->GpuAliveListIndexBySlot, AllocatedSlot);
 	}
 	else
 	{
 		check(CpuProxyClass);
 		NewRecord.ISKMC = nullptr;
 		NewRecord.InstanceId = FPrimitiveInstanceId();
-		FPrivateUtils::AddSlotToList(Shard.CpuAliveSlots, Shard.CpuAliveListIndexBySlot, SlotIndex);
+		FPrivateUtils::AddSlotToList(Bucket->CpuAliveSlots, Bucket->CpuAliveListIndexBySlot, AllocatedSlot);
 		FInstancedAnimRecord& Rec = AnimRecords[RecordIndex];
 		if (ExternalCpuProxyActor)
 		{
@@ -1965,23 +2062,25 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterGpuToCpu(const FGameInst
 	check(Rec->ISKMC);
 	check(Rec->SkeletalMesh);
 	check(Rec->CpuProxyClass);
-	check(Rec->BucketIndex != INDEX_NONE && Rec->ShardIndex != INDEX_NONE && Rec->SlotIndex != INDEX_NONE);
+	check(Rec->BucketIndex != INDEX_NONE && Rec->SlotIndex != INDEX_NONE);
 
 	checkf(Buckets.IsValidIndex(Rec->BucketIndex), TEXT("GIAG: invalid BucketIndex=%d."), Rec->BucketIndex);
 	FMeshBucket& Bucket = Buckets[Rec->BucketIndex];
-	checkf(Bucket.Shards.IsValidIndex(Rec->ShardIndex), TEXT("GIAG: invalid ShardIndex=%d."), Rec->ShardIndex);
-	FSkinnedShard& Shard = Bucket.Shards[Rec->ShardIndex];
-	check(Rec->SlotIndex >= 0 && Rec->SlotIndex < Shard.SlotCapacity);
+	check(Bucket.bStorageInitialized);
+	const int32 ShardIndex = FMeshBucket::ShardIndexOf(Rec->SlotIndex);
+	checkf(Bucket.Shards.IsValidIndex(ShardIndex), TEXT("GIAG: invalid ShardIndex=%d."), ShardIndex);
+	FSkinnedShard& Shard = Bucket.Shards[ShardIndex];
+	check(Rec->SlotIndex >= 0 && Rec->SlotIndex < Bucket.GetTotalSlotCapacity());
 
-	const int32 SlotIndex = Rec->SlotIndex;
-	const FTransform CurrentTransform = Shard.TransformBySlot[SlotIndex];
+	const int32 BucketSlot = Rec->SlotIndex;
+	const FTransform CurrentTransform = Bucket.TransformBySlot[BucketSlot];
 
 	Rec->ISKMC->RemoveInstance(Rec->InstanceId);
 	Shard.NumInstances = FMath::Max(0, Shard.NumInstances - 1);
 
 	// Keep shard slot + instance bytes alive; only switch backend list membership.
-	FPrivateUtils::RemoveSlotFromList(Shard.GpuAliveSlots, Shard.GpuAliveListIndexBySlot, SlotIndex);
-	FPrivateUtils::AddSlotToList(Shard.CpuAliveSlots, Shard.CpuAliveListIndexBySlot, SlotIndex);
+	FPrivateUtils::RemoveSlotFromList(Bucket.GpuAliveSlots, Bucket.GpuAliveListIndexBySlot, BucketSlot);
+	FPrivateUtils::AddSlotToList(Bucket.CpuAliveSlots, Bucket.CpuAliveListIndexBySlot, BucketSlot);
 
 	// Spawn CPU proxy actor.
 	Rec->CpuProxyActor = FPrivateUtils::SpawnCpuProxyActor(Handle, *Rec, GetWorld(), CurrentTransform);
@@ -2170,7 +2269,7 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterGpuToCpu(const FGameInst
 			if (FollowRec.ISKMC)
 			{
 				const int32 FollowBucketIndex = FollowRec.BucketIndex;
-				const int32 FollowShardIndex = FollowRec.ShardIndex;
+				const int32 FollowShardIndex = FMeshBucket::ShardIndexOf(FollowRec.SlotIndex);
 
 				checkf(Buckets.IsValidIndex(FollowBucketIndex), TEXT("GIAG Follow GPU->CPU: invalid BucketIndex=%d."), FollowBucketIndex);
 				check(FollowRec.ISKMC);
@@ -2190,7 +2289,7 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterGpuToCpu(const FGameInst
 				FollowRec.ISKMC = nullptr;
 				FollowRec.InstanceId = FPrimitiveInstanceId();
 				FollowRec.BucketIndex = INDEX_NONE;
-				FollowRec.ShardIndex = INDEX_NONE;
+				FollowRec.SlotIndex = INDEX_NONE;
 			}
 
 			FollowRec.CpuFollowSkinnedMesh = FPrivateUtils::CreateCpuFollowComponent(Rec->CpuProxyActor, Leader, FollowRec.SkeletalMesh);
@@ -2208,13 +2307,16 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterCpuToGpu(const FGameInst
 	// CPU -> GPU
 	check(Rec->CpuProxyActor);
 	check(Rec->SkeletalMesh);
-	check(Rec->BucketIndex != INDEX_NONE && Rec->ShardIndex != INDEX_NONE && Rec->SlotIndex != INDEX_NONE);
+	check(Rec->BucketIndex != INDEX_NONE && Rec->SlotIndex != INDEX_NONE);
 
 	checkf(Buckets.IsValidIndex(Rec->BucketIndex), TEXT("GIAG CPU->GPU: invalid BucketIndex=%d."), Rec->BucketIndex);
 	FMeshBucket& Bucket = Buckets[Rec->BucketIndex];
-	check(Bucket.Shards.IsValidIndex(Rec->ShardIndex));
-	FSkinnedShard& Shard = Bucket.Shards[Rec->ShardIndex];
-	const int32 SlotIndex = Rec->SlotIndex;
+	check(Bucket.bStorageInitialized);
+	const int32 MasterShardIndex = FMeshBucket::ShardIndexOf(Rec->SlotIndex);
+	check(Bucket.Shards.IsValidIndex(MasterShardIndex));
+	FSkinnedShard& Shard = Bucket.Shards[MasterShardIndex];
+	const int32 MasterBucketSlot = Rec->SlotIndex;
+	const int32 MasterShardSlot = FMeshBucket::ShardSlotOf(MasterBucketSlot);
 
 	// Convert CPU follow components back to GPU follow instances first (Handle stability).
 	if (Rec->FollowRecordIndices.Num() > 0)
@@ -2227,7 +2329,7 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterCpuToGpu(const FGameInst
 
 		TRefCountPtr<FGIAG_TransformProviderState> MasterState = Shard.TransformProvider ? Shard.TransformProvider->GetState() : nullptr;
 		check(MasterState.IsValid());
-		const int32 MasterSlotCapacity = Shard.SlotCapacity;
+		constexpr int32 MasterSlotCapacity = GIAG::DefaultSlotsPerShard;
 
 		for (const int32 FollowIndex : Rec->FollowRecordIndices)
 		{
@@ -2303,7 +2405,9 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterCpuToGpu(const FGameInst
 
 			EnsureHostActor();
 
-			// Find a shared follower shard already bound to this master (Bridge, remap ptr, bone counts).
+			const int32 MasterShardIdx = MasterShardIndex;
+
+			// Find a shared follower shard already bound to this master shard (State, MasterShardIndex, remap ptr, bone counts).
 			int32 FollowShardIndex = INDEX_NONE;
 			for (auto ShardIt = FollowBucket.Shards.CreateIterator(); ShardIt; ++ShardIt)
 			{
@@ -2316,6 +2420,10 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterCpuToGpu(const FGameInst
 					continue;
 				}
 				if (FollowShard.TransformProvider->GetMasterState() != MasterState)
+				{
+					continue;
+				}
+				if (FollowShard.TransformProvider->GetMasterShardIndex() != MasterShardIdx)
 				{
 					continue;
 				}
@@ -2336,31 +2444,29 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterCpuToGpu(const FGameInst
 			}
 			if (FollowShardIndex == INDEX_NONE)
 			{
-				FollowShardIndex = FPrivateUtils::AddFollowerShardToBucket(FollowBucket, Group, *HostActor, *FollowMesh, MasterSlotCapacity, MasterState, DstNumBones, SrcBones, RemapShared);
+				FollowShardIndex = FPrivateUtils::AddFollowerShardToBucket(FollowBucket, Group, *HostActor, *FollowMesh, MasterSlotCapacity, MasterState, DstNumBones, SrcBones, RemapShared, MasterShardIdx);
 			}
 			check(FollowBucket.Shards.IsValidIndex(FollowShardIndex));
 
 			FSkinnedShard& FollowShard = FollowBucket.Shards[FollowShardIndex];
 			check(FollowShard.TransformProvider);
 
-			const int32 AnimIndex = SlotIndex;
-			check(AnimIndex >= 0 && AnimIndex < MasterSlotCapacity);
+			check(MasterShardSlot >= 0 && MasterShardSlot < MasterSlotCapacity);
 
-			const FTransform SpawnTransform = Shard.TransformBySlot[AnimIndex];
-			const FPrimitiveInstanceId InstanceId = FollowShard.ISKMC->AddInstance(SpawnTransform, AnimIndex, true);
+			const FTransform SpawnTransform = Bucket.TransformBySlot[MasterBucketSlot];
+			const FPrimitiveInstanceId InstanceId = FollowShard.ISKMC->AddInstance(SpawnTransform, MasterShardSlot, true);
 			FollowShard.NumInstances += 1;
 			FollowBucket.NumInstances++;
 
 			FollowRec.ISKMC = FollowShard.ISKMC;
 			FollowRec.InstanceId = InstanceId;
 			FollowRec.BucketIndex = FollowBucketIndex;
-			FollowRec.ShardIndex = FollowShardIndex;
 			FollowRec.GroupIndex = Rec->GroupIndex;
-			FollowRec.SlotIndex = AnimIndex;
+			FollowRec.SlotIndex = FollowShardIndex * GIAG::DefaultSlotsPerShard + MasterShardSlot;
 		}
 	}
 
-	FTransform SpawnTransform = Shard.TransformBySlot[SlotIndex];
+	FTransform SpawnTransform = Bucket.TransformBySlot[MasterBucketSlot];
 	if (USkeletalMeshComponent* Skinned = IGIAG_ActorInterface::Execute_GetInstancedAnimationSkinnedMesh(Rec->CpuProxyActor))
 	{
 		SpawnTransform = Skinned->GetComponentTransform();
@@ -2463,19 +2569,19 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterCpuToGpu(const FGameInst
 	Rec->CpuProxyActor = nullptr;
 
 	check(Shard.ISKMC);
-	const FPrimitiveInstanceId InstanceId = Shard.ISKMC->AddInstance(SpawnTransform, SlotIndex, true);
+	const FPrimitiveInstanceId InstanceId = Shard.ISKMC->AddInstance(SpawnTransform, MasterShardSlot, true);
 	Shard.NumInstances += 1;
-	Shard.TransformBySlot[SlotIndex] = SpawnTransform;
+	Bucket.TransformBySlot[MasterBucketSlot] = SpawnTransform;
 	// Slot is (re)entering GPU evaluation; initialize previous=current once to avoid velocity spikes from stale/uninitialized GPU buffer.
-	Shard.NewSlotsThisTick.Add((uint32)SlotIndex);
-	if (!Shard.TransformDirty[SlotIndex])
+	Bucket.NewSlotsThisTick.Add((uint32)MasterBucketSlot);
+	if (!Bucket.TransformDirty[MasterBucketSlot])
 	{
-		Shard.TransformDirty[SlotIndex] = true;
-		Shard.DirtyTransformSlots.Add((uint32)SlotIndex);
+		Bucket.TransformDirty[MasterBucketSlot] = true;
+		Bucket.DirtyTransformSlots.Add((uint32)MasterBucketSlot);
 	}
 
-	FPrivateUtils::RemoveSlotFromList(Shard.CpuAliveSlots, Shard.CpuAliveListIndexBySlot, SlotIndex);
-	FPrivateUtils::AddSlotToList(Shard.GpuAliveSlots, Shard.GpuAliveListIndexBySlot, SlotIndex);
+	FPrivateUtils::RemoveSlotFromList(Bucket.CpuAliveSlots, Bucket.CpuAliveListIndexBySlot, MasterBucketSlot);
+	FPrivateUtils::AddSlotToList(Bucket.GpuAliveSlots, Bucket.GpuAliveListIndexBySlot, MasterBucketSlot);
 
 	// Ensure GPU AnimLibrary data exists for any clips referenced by this instance.
 	// (CPU may have allocated clip indices via RequestClipIndexOnly without baking pixels.)
@@ -2491,7 +2597,7 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterCpuToGpu(const FGameInst
 			{
 				continue;
 			}
-			const void* NodePtr = Shard.GetNodePtr(NodeIdx, SlotIndex);
+			const void* NodePtr = Bucket.GetNodePtr(NodeIdx, MasterBucketSlot);
 			TmpClips.Reset();
 			Node.NodeMeta->EnumerateClips(NodePtr, TmpClips);
 			for (const int32 ClipIndex : TmpClips)
@@ -2516,9 +2622,9 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterCpuToGpu(const FGameInst
 
 	Rec->ISKMC = Shard.ISKMC;
 	Rec->InstanceId = InstanceId;
-	if (Shard.TransformDirty[SlotIndex])
+	if (Bucket.TransformDirty[MasterBucketSlot])
 	{
-		Shard.DirtyTransformSlots.Add(SlotIndex);
+		Bucket.DirtyTransformSlots.Add((uint32)MasterBucketSlot);
 	}
 }
 
@@ -2681,9 +2787,11 @@ void UGameInstancedAnimationGraphSubsystem::TickCpuAttachSync_GameThread()
 
 		checkf(Buckets.IsValidIndex(Rec.BucketIndex), TEXT("GIAG AttachSync: invalid BucketIndex=%d."), Rec.BucketIndex);
 		FMeshBucket& MeshBucket = Buckets[Rec.BucketIndex];
-		check(MeshBucket.Shards.IsValidIndex(Rec.ShardIndex));
-		FSkinnedShard& Shard = MeshBucket.Shards[Rec.ShardIndex];
-		checkf(Rec.SlotIndex >= 0 && Rec.SlotIndex < Shard.SlotCapacity, TEXT("GIAG AttachSync: invalid SlotIndex=%d."), Rec.SlotIndex);
+		check(MeshBucket.bStorageInitialized);
+		checkf(Rec.SlotIndex >= 0 && Rec.SlotIndex < MeshBucket.GetTotalSlotCapacity(), TEXT("GIAG AttachSync: invalid SlotIndex=%d."), Rec.SlotIndex);
+		const int32 ShardIndex = FMeshBucket::ShardIndexOf(Rec.SlotIndex);
+		check(MeshBucket.Shards.IsValidIndex(ShardIndex));
+		const int32 BucketSlot = Rec.SlotIndex;
 
 		// Use the CPU pose cache produced earlier in the frame.
 		const FGameInstancedAnimationGraphHandle Handle{ RecordIndex, AnimRecordSerials[RecordIndex] };
@@ -2697,7 +2805,7 @@ void UGameInstancedAnimationGraphSubsystem::TickCpuAttachSync_GameThread()
 		TArray<FTransform3f> ComponentPose;
 		ConvertLocalPoseToComponentPoseChecked(Handle, LocalPose, ComponentPose);
 
-		const FTransform3f C2W = FTransform3f(Shard.TransformBySlot[Rec.SlotIndex]);
+		const FTransform3f C2W = FTransform3f(MeshBucket.TransformBySlot[BucketSlot]);
 
 		for (const FGameInstancedAnimationAttachHandle& AttachHandle : Rec.AttachHandles)
 		{
@@ -2916,21 +3024,21 @@ void UGameInstancedAnimationGraphSubsystem::RemoveInstance(FGameInstancedAnimati
 		}
 
 		const int32 BucketIndex = Rec->BucketIndex;
-		const int32 ShardIndex = Rec->ShardIndex;
-		const int32 SlotIndex = Rec->SlotIndex;
 		const int32 GroupIndex = Rec->GroupIndex;
+		const int32 BucketSlot = Rec->SlotIndex;
 		AActor* ProxyActor = Rec->CpuProxyActor;
 
 		checkf(Buckets.IsValidIndex(BucketIndex), TEXT("GIAG CPU: invalid BucketIndex=%d."), BucketIndex);
 		FMeshBucket& Bucket = Buckets[BucketIndex];
+		check(Bucket.bStorageInitialized);
+		const int32 ShardIndex = FMeshBucket::ShardIndexOf(BucketSlot);
 		check(Bucket.Shards.IsValidIndex(ShardIndex));
-		FSkinnedShard& Shard = Bucket.Shards[ShardIndex];
 
 		checkf(Groups.IsValidIndex(GroupIndex), TEXT("GIAG CPU: invalid GroupIndex=%d."), GroupIndex);
 		FGraphGroup& Group = Groups[GroupIndex];
 
-		checkf(SlotIndex >= 0 && SlotIndex < Shard.SlotCapacity, TEXT("GIAG CPU: invalid SlotIndex=%d."), SlotIndex);
-		check(Shard.SlotAlive[SlotIndex]);
+		checkf(BucketSlot >= 0 && BucketSlot < Bucket.GetTotalSlotCapacity(), TEXT("GIAG CPU: invalid SlotIndex=%d."), BucketSlot);
+		check(Bucket.SlotAlive[BucketSlot]);
 
 		// Destroy per-node AoS data for this slot.
 		check(Group.Compiled);
@@ -2939,17 +3047,17 @@ void UGameInstancedAnimationGraphSubsystem::RemoveInstance(FGameInstancedAnimati
 		{
 			const FStructProperty* SP = Group.NodeProperties[NodeIdx];
 			check(SP && SP->Struct);
-			uint8* NodePtr = Shard.GetNodePtr(NodeIdx, SlotIndex);
+			uint8* NodePtr = Bucket.GetNodePtr(NodeIdx, BucketSlot);
 			SP->Struct->DestroyStruct(NodePtr);
-			FMemory::Memzero(NodePtr, (SIZE_T)Shard.NodeStrideBytes[NodeIdx]);
+			FMemory::Memzero(NodePtr, (SIZE_T)Bucket.NodeStrideBytes[NodeIdx]);
 		}
 
-		Shard.SlotAlive[SlotIndex] = false;
-		Shard.RecordIndexBySlot[SlotIndex] = INDEX_NONE;
-		Shard.FreeSlots.Add(SlotIndex);
-		Shard.TransformBySlot[SlotIndex] = FTransform::Identity;
+		Bucket.SlotAlive[BucketSlot] = false;
+		Bucket.RecordIndexBySlot[BucketSlot] = INDEX_NONE;
+		Bucket.FreeSlot(BucketSlot);
+		Bucket.TransformBySlot[BucketSlot] = FTransform::Identity;
 
-		FPrivateUtils::RemoveSlotFromList(Shard.CpuAliveSlots, Shard.CpuAliveListIndexBySlot, SlotIndex);
+		FPrivateUtils::RemoveSlotFromList(Bucket.CpuAliveSlots, Bucket.CpuAliveListIndexBySlot, BucketSlot);
 
 		// If proxy actor is external, we do NOT destroy it.
 		if (Rec->bExternalCpuProxyActor)
@@ -2978,7 +3086,7 @@ void UGameInstancedAnimationGraphSubsystem::RemoveInstance(FGameInstancedAnimati
 	if (Rec->MasterRecordIndex != INDEX_NONE)
 	{
 		const int32 FollowBucketIndex = Rec->BucketIndex;
-		const int32 FollowShardIndex = Rec->ShardIndex;
+		const int32 FollowShardIndex = FMeshBucket::ShardIndexOf(Rec->SlotIndex);
 
 		const int32 MasterIndex = Rec->MasterRecordIndex;
 
@@ -3041,18 +3149,19 @@ void UGameInstancedAnimationGraphSubsystem::RemoveInstance(FGameInstancedAnimati
 	FMeshBucket& Bucket = Buckets[BucketIndex];
 
 	const int32 GroupIndex = Rec->GroupIndex;
-	const int32 SlotIndex = Rec->SlotIndex;
-	const int32 ShardIndex = Rec->ShardIndex;
+	const int32 BucketSlot = Rec->SlotIndex;
+	const int32 ShardIndex = FMeshBucket::ShardIndexOf(BucketSlot);
 
 	checkf(Groups.IsValidIndex(GroupIndex), TEXT("GIAG: invalid GroupIndex=%d."), GroupIndex);
 	FGraphGroup& Group = Groups[GroupIndex];
+	check(Bucket.bStorageInitialized);
 	check(Bucket.Shards.IsValidIndex(ShardIndex));
 	FSkinnedShard& Shard = Bucket.Shards[ShardIndex];
-	checkf(Shard.SlotAlive.Num() == Shard.SlotCapacity && Shard.RecordIndexBySlot.Num() == Shard.SlotCapacity,
-		TEXT("GIAG: shard slot arrays size mismatch (SlotAlive=%d RecordIndexBySlot=%d Cap=%d)."),
-		Shard.SlotAlive.Num(), Shard.RecordIndexBySlot.Num(), Shard.SlotCapacity);
-	checkf(SlotIndex >= 0 && SlotIndex < Shard.SlotCapacity, TEXT("GIAG: invalid SlotIndex=%d."), SlotIndex);
-	check(Shard.SlotAlive[SlotIndex]);
+	checkf(Bucket.SlotAlive.Num() == Bucket.GetTotalSlotCapacity() && Bucket.RecordIndexBySlot.Num() == Bucket.GetTotalSlotCapacity(),
+		TEXT("GIAG: bucket slot arrays size mismatch (SlotAlive=%d RecordIndexBySlot=%d Cap=%d)."),
+		Bucket.SlotAlive.Num(), Bucket.RecordIndexBySlot.Num(), Bucket.GetTotalSlotCapacity());
+	checkf(BucketSlot >= 0 && BucketSlot < Bucket.GetTotalSlotCapacity(), TEXT("GIAG: invalid SlotIndex=%d."), BucketSlot);
+	check(Bucket.SlotAlive[BucketSlot]);
 
 	// Destroy per-node AoS data for this slot.
 	check(Group.Compiled);
@@ -3061,21 +3170,21 @@ void UGameInstancedAnimationGraphSubsystem::RemoveInstance(FGameInstancedAnimati
 	{
 		const FStructProperty* SP = Group.NodeProperties[NodeIdx];
 		check(SP && SP->Struct);
-		uint8* NodePtr = Shard.GetNodePtr(NodeIdx, SlotIndex);
+		uint8* NodePtr = Bucket.GetNodePtr(NodeIdx, BucketSlot);
 		SP->Struct->DestroyStruct(NodePtr);
-		FMemory::Memzero(NodePtr, (SIZE_T)Shard.NodeStrideBytes[NodeIdx]);
+		FMemory::Memzero(NodePtr, (SIZE_T)Bucket.NodeStrideBytes[NodeIdx]);
 	}
 
-	Shard.SlotAlive[SlotIndex] = false;
-	Shard.RecordIndexBySlot[SlotIndex] = INDEX_NONE;
-	Shard.FreeSlots.Add(SlotIndex);
-	FPrivateUtils::RemoveSlotFromList(Shard.GpuAliveSlots, Shard.GpuAliveListIndexBySlot, SlotIndex);
+	Bucket.SlotAlive[BucketSlot] = false;
+	Bucket.RecordIndexBySlot[BucketSlot] = INDEX_NONE;
+	Bucket.FreeSlot(BucketSlot);
+	FPrivateUtils::RemoveSlotFromList(Bucket.GpuAliveSlots, Bucket.GpuAliveListIndexBySlot, BucketSlot);
 
-	Shard.TransformBySlot[SlotIndex] = FTransform::Identity;
-	if (Shard.TransformDirty[SlotIndex])
+	Bucket.TransformBySlot[BucketSlot] = FTransform::Identity;
+	if (Bucket.TransformDirty[BucketSlot])
 	{
-		Shard.TransformDirty[SlotIndex] = false;
-		Shard.DirtyTransformSlots.RemoveSingleSwap((uint32)SlotIndex, EAllowShrinking::No);
+		Bucket.TransformDirty[BucketSlot] = false;
+		Bucket.DirtyTransformSlots.RemoveSingleSwap((uint32)BucketSlot, EAllowShrinking::No);
 	}
 
 	check(Rec->ISKMC != nullptr);
@@ -3109,8 +3218,9 @@ void UGameInstancedAnimationGraphSubsystem::SetInstanceTransform(const FGameInst
 	}
 
 	FMeshBucket& Bucket = Buckets[Rec->BucketIndex];
-	FSkinnedShard& Shard = Bucket.Shards[Rec->ShardIndex];
-	if (FMemory::Memcmp(&Shard.TransformBySlot[Rec->SlotIndex], &NewTransform, sizeof(FTransform)) == 0)
+	check(Bucket.bStorageInitialized);
+	const int32 BucketSlot = Rec->SlotIndex;
+	if (FMemory::Memcmp(&Bucket.TransformBySlot[BucketSlot], &NewTransform, sizeof(FTransform)) == 0)
 	{
 		return;
 	}
@@ -3125,8 +3235,8 @@ void UGameInstancedAnimationGraphSubsystem::SetInstanceTransform(const FGameInst
 			bTeleport ? ETeleportType::TeleportPhysics : ETeleportType::None);
 
 		// Keep shard slot transform in sync for culling and backend switching.
-		Shard.TransformBySlot[Rec->SlotIndex] = NewTransform;
-		Shard.TransformDirty[Rec->SlotIndex] = true;
+		Bucket.TransformBySlot[BucketSlot] = NewTransform;
+		Bucket.TransformDirty[BucketSlot] = true;
 		return;
 	}
 
@@ -3135,13 +3245,13 @@ void UGameInstancedAnimationGraphSubsystem::SetInstanceTransform(const FGameInst
 	{
 		FPrivateUtils::UpdateISKMCInstanceTransformById(*Rec->ISKMC, Rec->InstanceId, NewTransform, true);
 
-		checkf(Rec->SlotIndex >= 0 && Rec->SlotIndex < Shard.SlotCapacity, TEXT("GIAG: invalid SlotIndex=%d."), Rec->SlotIndex);
+		checkf(BucketSlot >= 0 && BucketSlot < Bucket.GetTotalSlotCapacity(), TEXT("GIAG: invalid SlotIndex=%d."), BucketSlot);
 
-		Shard.TransformBySlot[Rec->SlotIndex] = NewTransform;
-		if (!Shard.TransformDirty[Rec->SlotIndex])
+		Bucket.TransformBySlot[BucketSlot] = NewTransform;
+		if (!Bucket.TransformDirty[BucketSlot])
 		{
-			Shard.TransformDirty[Rec->SlotIndex] = true;
-			Shard.DirtyTransformSlots.Add((uint32)Rec->SlotIndex);
+			Bucket.TransformDirty[BucketSlot] = true;
+			Bucket.DirtyTransformSlots.Add((uint32)BucketSlot);
 		}
 	}
 
@@ -3167,8 +3277,8 @@ FTransform UGameInstancedAnimationGraphSubsystem::GetInstanceTransform(const FGa
 	auto GetTransformByRecord = [this](const FInstancedAnimRecord& Rec)
 	{
 		auto& Bucket = Buckets[Rec.BucketIndex];
-		auto& Shard = Bucket.Shards[Rec.ShardIndex];
-		return Shard.TransformBySlot[Rec.SlotIndex];
+		check(Bucket.bStorageInitialized);
+		return Bucket.TransformBySlot[Rec.SlotIndex];
 	};
 	if (Rec->MasterRecordIndex != INDEX_NONE)
 	{
@@ -3226,41 +3336,33 @@ void UGameInstancedAnimationGraphSubsystem::CleanupUnusedAnimations(float OlderT
 		{
 			const FMeshBucket& Bucket = Buckets[BucketIndex];
 			check(Bucket.GroupIndex == GroupIndex);
-
-			for (auto ShardIt = Bucket.Shards.CreateConstIterator(); ShardIt; ++ShardIt)
+			if (!Bucket.bStorageInitialized)
 			{
-				const FSkinnedShard& Shard = *ShardIt;
-				if (!Shard.TransformProvider || Shard.TransformProvider->GetMode() == EGIAG_TransformProviderMode::FollowerCopyOrRemap)
-				{
-					continue;
-				}
-				if (Shard.NodeStorageByNode.Num() == 0)
-				{
-					continue;
-				}
+				continue;
+			}
 
-				for (int32 Slot = 0; Slot < Shard.SlotCapacity; ++Slot)
+			const int32 TotalCap = Bucket.GetTotalSlotCapacity();
+			for (int32 SlotIdx = 0; SlotIdx < TotalCap; ++SlotIdx)
+			{
+				if (!Bucket.SlotAlive.IsValidIndex(SlotIdx) || !Bucket.SlotAlive[SlotIdx])
 				{
-					if (!Shard.SlotAlive.IsValidIndex(Slot) || !Shard.SlotAlive[Slot])
+					continue;
+				}
+				for (int32 NodeIdx = 0; NodeIdx < Group.Compiled->NumNodes; ++NodeIdx)
+				{
+					const FGIAG_AnimCompiledNode& Node = Group.Compiled->Nodes[NodeIdx];
+					if (!Node.NodeMeta)
 					{
 						continue;
 					}
-					for (int32 NodeIdx = 0; NodeIdx < Group.Compiled->NumNodes; ++NodeIdx)
+					const void* NodePtr = Bucket.GetNodePtr(NodeIdx, SlotIdx);
+					TmpClips.Reset();
+					Node.NodeMeta->EnumerateClips(NodePtr, TmpClips);
+					for (int32 ClipIndex : TmpClips)
 					{
-						const FGIAG_AnimCompiledNode& Node = Group.Compiled->Nodes[NodeIdx];
-						if (!Node.NodeMeta)
+						if (ClipIndex != INDEX_NONE)
 						{
-							continue;
-						}
-						const void* NodePtr = Shard.GetNodePtr(NodeIdx, Slot);
-						TmpClips.Reset();
-						Node.NodeMeta->EnumerateClips(NodePtr, TmpClips);
-						for (int32 ClipIndex : TmpClips)
-						{
-							if (ClipIndex != INDEX_NONE)
-							{
-								Referenced.Add(ClipIndex);
-							}
+							Referenced.Add(ClipIndex);
 						}
 					}
 				}
@@ -3489,10 +3591,12 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddFol
 	}
 	checkf(Buckets.IsValidIndex(MasterRec->BucketIndex), TEXT("GIAG: invalid master BucketIndex=%d."), MasterRec->BucketIndex);
 	FMeshBucket& Bucket = Buckets[MasterRec->BucketIndex];
-	checkf(Bucket.Shards.IsValidIndex(MasterRec->ShardIndex),
-		TEXT("GIAG: invalid master ShardIndex=%d (BucketIndex=%d)."), MasterRec->ShardIndex, MasterRec->BucketIndex);
-	FSkinnedShard& MasterShard = Bucket.Shards[MasterRec->ShardIndex];
-	const int32 MasterSlotCapacity = MasterShard.SlotCapacity;
+	const int32 MasterShardIndex = FMeshBucket::ShardIndexOf(MasterRec->SlotIndex);
+	checkf(Bucket.Shards.IsValidIndex(MasterShardIndex),
+		TEXT("GIAG: invalid master ShardIndex=%d (BucketIndex=%d)."), MasterShardIndex, MasterRec->BucketIndex);
+	FSkinnedShard& MasterShard = Bucket.Shards[MasterShardIndex];
+	check(Bucket.bStorageInitialized);
+	constexpr int32 MasterSlotCapacity = GIAG::DefaultSlotsPerShard;
 
 	const int32 FollowBucketIndex = FindOrCreateBucket(SkeletalMesh, MasterRec->GroupIndex);
 	checkf(Buckets.IsValidIndex(FollowBucketIndex), TEXT("GIAG: invalid follow BucketIndex=%d."), FollowBucketIndex);
@@ -3561,11 +3665,13 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddFol
 		}
 	}
 
-	// Find a shared follower shard already bound to this master (Bridge, remap ptr, bone counts).
+	const int32 MasterShardIdx = MasterShardIndex;
+
+	// Find a shared follower shard already bound to this master shard (State, MasterShardIndex, remap ptr, bone counts).
 	int32 FollowShardIndex = INDEX_NONE;
 	for (auto ShardIt = FollowBucket.Shards.CreateIterator(); ShardIt; ++ShardIt)
 	{
-		const int32 ShardIndex = ShardIt.GetIndex();
+		const int32 FollowCandShardIndex = ShardIt.GetIndex();
 		FSkinnedShard& Shard = *ShardIt;
 		check(Shard.ISKMC);
 		check(Shard.TransformProvider);
@@ -3574,6 +3680,10 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddFol
 			continue;
 		}
 		if (Shard.TransformProvider->GetMasterState() != MasterState)
+		{
+			continue;
+		}
+		if (Shard.TransformProvider->GetMasterShardIndex() != MasterShardIdx)
 		{
 			continue;
 		}
@@ -3589,12 +3699,12 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddFol
 		{
 			continue;
 		}
-		FollowShardIndex = ShardIndex;
+		FollowShardIndex = FollowCandShardIndex;
 		break;
 	}
 	if (FollowShardIndex == INDEX_NONE)
 	{
-		FollowShardIndex = FPrivateUtils::AddFollowerShardToBucket(FollowBucket, Group, *HostActor, *SkeletalMesh, MasterSlotCapacity, MasterState, DstNumBones, SrcBones, RemapShared);;
+		FollowShardIndex = FPrivateUtils::AddFollowerShardToBucket(FollowBucket, Group, *HostActor, *SkeletalMesh, MasterSlotCapacity, MasterState, DstNumBones, SrcBones, RemapShared, MasterShardIdx);
 	}
 	if (FollowShardIndex == INDEX_NONE || !FollowBucket.Shards.IsValidIndex(FollowShardIndex))
 	{
@@ -3604,12 +3714,12 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddFol
 	FSkinnedShard& FollowShard = FollowBucket.Shards[FollowShardIndex];
 	check(FollowShard.TransformProvider);
 
-	const int32 AnimIndex = MasterRec->SlotIndex;
-	checkf(AnimIndex >= 0 && AnimIndex < MasterSlotCapacity, TEXT("GIAG: invalid master SlotIndex=%d for follow."), AnimIndex);
+	const int32 MasterShardSlot = FMeshBucket::ShardSlotOf(MasterRec->SlotIndex);
+	checkf(MasterShardSlot >= 0 && MasterShardSlot < MasterSlotCapacity, TEXT("GIAG: invalid master ShardSlot=%d for follow."), MasterShardSlot);
 
-	// Spawn follow instance at master's transform, but select animation slot by AnimationIndex==MasterRec->SlotIndex.
-	const FTransform SpawnTransform = MasterShard.TransformBySlot[AnimIndex];
-	const FPrimitiveInstanceId InstanceId = FollowShard.ISKMC->AddInstance(SpawnTransform, AnimIndex, true);
+	// Spawn follow instance at master's transform; ISKMC animation index is shard-local (mirrors master's ShardSlot).
+	const FTransform SpawnTransform = Bucket.TransformBySlot[MasterRec->SlotIndex];
+	const FPrimitiveInstanceId InstanceId = FollowShard.ISKMC->AddInstance(SpawnTransform, MasterShardSlot, true);
 	FollowShard.NumInstances += 1;
 	FollowBucket.NumInstances++;
 
@@ -3618,9 +3728,8 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddFol
 	NewRec.ISKMC = FollowShard.ISKMC;
 	NewRec.InstanceId = InstanceId;
 	NewRec.BucketIndex = FollowBucketIndex;
-	NewRec.ShardIndex = FollowShardIndex;
 	NewRec.GroupIndex = MasterRec->GroupIndex;
-	NewRec.SlotIndex = AnimIndex;
+	NewRec.SlotIndex = FollowShardIndex * GIAG::DefaultSlotsPerShard + MasterShardSlot;
 	NewRec.MasterRecordIndex = MasterHandle.RecordIndex;
 
 	const int32 RecordIndex = AnimRecords.Add(MoveTemp(NewRec));
@@ -3823,230 +3932,208 @@ void UGameInstancedAnimationGraphSubsystem::Tick(float DeltaTime)
 			continue;
 		}
 
-		// Evaluate each bucket shard independently (slot capacity is per-shard).
+		// Build one payload per bucket (all shards contribute).
 		for (const int32 BucketIndex : Group.BucketIndices)
 		{
 			FMeshBucket& Bucket = Buckets[BucketIndex];
 			check(Bucket.GroupIndex == GroupIndex);
+			check(Bucket.SharedState.IsValid());
+
+			const int32 TotalCapacity = Bucket.GetTotalSlotCapacity();
+
+			if (bSkeletonStaticRebuilt)
+			{
+				Bucket.bSentSkeletonStaticUpload = false;
+			}
 
 			int32 DebugTotalAlive = 0;
 			int32 DebugTotalActive = 0;
 
-			for (FSkinnedShard& Shard : Bucket.Shards)
+			if (!Bucket.bStorageInitialized || TotalCapacity <= 0)
 			{
-				if (bSkeletonStaticRebuilt)
-				{
-					Shard.bSentSkeletonStaticUpload = false;
-				}
-
-				// Follower shard: does not participate in GIAG evaluation (it reuses master's TransformBuffer on RT).
-				if (Shard.TransformProvider && Shard.TransformProvider->GetMode() == EGIAG_TransformProviderMode::FollowerCopyOrRemap)
-				{
-					continue;
-				}
-
-				const int32 SlotCapacity = Shard.SlotCapacity;
-				checkf(Shard.SlotAlive.Num() == SlotCapacity && Shard.RecordIndexBySlot.Num() == SlotCapacity,
-					TEXT("GIAG: shard slot arrays size mismatch (SlotAlive=%d RecordIndexBySlot=%d Cap=%d)."),
-					Shard.SlotAlive.Num(), Shard.RecordIndexBySlot.Num(), SlotCapacity);
-
-				if (!bDoGPU)
-				{
-					continue;
-				}
-
-				check(Shard.ISKMC);
-				check(Shard.TransformProvider);
-				check(Shard.TransformProvider->GetState().IsValid());
-
-				// ---------------- GPU backend ----------------
-				if (Shard.GpuAliveSlots.Num() == 0)
-				{
-					continue;
-				}
-
-				DebugTotalAlive += Shard.GpuAliveSlots.Num();
-
-				// Filter to active GPU slots (frustum cull) into persistent array.
-				Shard.GpuActiveInstanceIndices.Reset();
-				bool bPreserve = false;
-				if (!bEnableFrustumCull)
-				{
-					Shard.GpuActiveInstanceIndices = Shard.GpuAliveSlots;
-				}
-				else
-				{
-					Shard.GpuActiveInstanceIndices.Reserve(Shard.GpuAliveSlots.Num());
-					for (const uint32 SlotU : Shard.GpuAliveSlots)
-					{
-						const int32 Slot = (int32)SlotU;
-						const FVector Center = Shard.TransformBySlot[Slot].GetLocation();
-
-						float Radius = MinRadius;
-						const float Scale3D = Shard.TransformBySlot[Slot].GetScale3D().GetAbsMax();
-						Radius = FMath::Max(Radius, (float)Bucket.BoundSphereRadius * Scale3D);
-						Radius += CullPadding;
-
-						if (ViewFrustum->IntersectSphere(Center, Radius))
-						{
-							Shard.GpuActiveInstanceIndices.Add(SlotU);
-						}
-					}
-
-					if (Shard.GpuActiveInstanceIndices.Num() > 0 && Shard.GpuActiveInstanceIndices.Num() < Shard.GpuAliveSlots.Num())
-					{
-						bPreserve = true;
-					}
-				}
-
-				FGIAG_AnimGraphRunParams Params;
-				Params.NumInstances = Shard.GpuActiveInstanceIndices.Num();
-				Params.SlotCapacity = SlotCapacity;
-				Params.NumBones = Group.NumBones;
-				Params.TimeSlots = MakeArrayView(TimeSlots);
-				Params.TimeSlotIndexBySlot = Shard.TimeSlotIndexBySlot;
-				Params.Skeleton = Group.Skeleton;
-				Params.ParentIndices = &Cache->ParentIndices;
-				Params.InverseRefPoseTRS = &Cache->InverseRefPoseTRS;
-
-				Params.ActiveInstanceIndices = Shard.GpuActiveInstanceIndices;
-				if (DebugReadbackEnabledSerialByRecordIndex.Num() > 0 || DebugNeedNodeBitsReadbackEnabledSerialByRecordIndex.Num() > 0)
-				{
-					Params.DebugCpuRequestFrame = GFrameCounter;
-					for (const uint32 SlotU : Params.ActiveInstanceIndices)
-					{
-						const int32 Slot = (int32)SlotU;
-						const int32 RecordIndex = Shard.RecordIndexBySlot[Slot];
-						if (RecordIndex == INDEX_NONE)
-						{
-							continue;
-						}
-						const FInstancedAnimRecord& Rec = AnimRecords[RecordIndex];
-						if (Rec.MasterRecordIndex != INDEX_NONE)
-						{
-							continue; // follower does not evaluate
-						}
-
-						if (const int32* EnabledSerialLocalPose = DebugReadbackEnabledSerialByRecordIndex.Find(RecordIndex))
-						{
-							if (*EnabledSerialLocalPose == AnimRecordSerials[RecordIndex])
-							{
-								FGIAG_LocalPoseReadbackRequest Req;
-								Req.RecordIndex = RecordIndex;
-								Req.SerialNumber = *EnabledSerialLocalPose;
-								Req.SlotIndex = (uint32)Slot;
-								Params.DebugLocalPoseReadbackRequests.Add(MoveTemp(Req));
-							}
-						}
-
-						if (const int32* EnabledSerialNeedBits = DebugNeedNodeBitsReadbackEnabledSerialByRecordIndex.Find(RecordIndex))
-						{
-							if (*EnabledSerialNeedBits == AnimRecordSerials[RecordIndex])
-							{
-								FGIAG_NeedNodeBitsReadbackRequest Req;
-								Req.RecordIndex = RecordIndex;
-								Req.SerialNumber = *EnabledSerialNeedBits;
-								Req.SlotIndex = (uint32)Slot;
-								Params.DebugNeedNodeBitsReadbackRequests.Add(MoveTemp(Req));
-							}
-						}
-					}
-				}
-				DebugTotalActive += Params.NumInstances;
-				Params.AnimLibraryUpload = Cache->PendingAnimLibraryUpload;
-				Params.AnimLibraryVersion = Cache->AnimLibraryVersion;
-				Params.NumClips = (uint32)Cache->ClipSlots.Num();
-				Params.AnimTRSNum = (uint32)Cache->AnimTRSCapacity;
-
-				checkf(Params.AnimLibraryVersion != 0 && Params.NumClips != 0 && Params.AnimTRSNum != 0 && Group.NumBones > 0,
-					TEXT("GIAG: AnimLibrary not ready for Skeleton '%s'."), *GetNameSafe(Cache->Skeleton));
-
-				if (Params.NumInstances <= 0)
-				{
-					continue;
-				}
-
-				// GT -> RT: pack dirty transforms (RT computes World->Component and uploads sparse ranges).
-				// Also pass "new slot" flags to initialize previous=current on first frame (velocity correctness).
-				if (Shard.DirtyTransformSlots.Num() > 0 || Shard.NewSlotsThisTick.Num() > 0)
-				{
-					auto TransformUpload = MakeShared<FGIAG_TransformUploadData>();
-					TransformUpload->SlotCapacity = (uint32)SlotCapacity;
-
-					TransformUpload->DirtySlots.Reserve(Shard.DirtyTransformSlots.Num());
-					TransformUpload->DirtyComponentToWorld.Reserve(Shard.DirtyTransformSlots.Num());
-
-					for (const int32 Slot : Shard.DirtyTransformSlots)
-					{
-						checkf(Slot < SlotCapacity, TEXT("GIAG: invalid dirty slot %d (Cap=%d)."), Slot, SlotCapacity);
-						if (Shard.TransformDirty[Slot] == false)
-						{
-							continue;
-						}
-
-						Shard.TransformDirty[Slot] = false;
-						TransformUpload->DirtyComponentToWorld.Add(FTransform3f(Shard.TransformBySlot[Slot]));
-						TransformUpload->DirtySlots.Add(Slot);
-					}
-					Shard.DirtyTransformSlots.Reset();
-
-					if (Shard.NewSlotsThisTick.Num() > 0)
-					{
-						TransformUpload->InitPrevBySlot.SetNumZeroed(SlotCapacity);
-						for (const uint32 NewSlotU : Shard.NewSlotsThisTick)
-						{
-							const int32 NewSlot = (int32)NewSlotU;
-							checkf(NewSlot >= 0 && NewSlot < SlotCapacity, TEXT("GIAG: invalid NewSlot=%d (Cap=%d)."), NewSlot, SlotCapacity);
-							TransformUpload->InitPrevBySlot[NewSlot] = 1u;
-						}
-						Shard.NewSlotsThisTick.Reset();
-					}
-
-					Params.TransformUpload = TransformUpload;
-				}
-
-				// One-time (or rebuild) skeleton upload: driven by shard-local GT flag.
-				const bool bUploadSkeletonStatic = !Shard.bSentSkeletonStaticUpload;
-				FGIAG_AnimGraphUploads Uploads = Shard.UploadBuilder.BuildUploads_GameThread(
-					*Group.Compiled,
-					Shard.NodeBasePtrsByNode,
-					Shard.NodeStrideBytes,
-					SlotCapacity,
-					Params,
-					Shard.DirtyNodeIndices,
-					Shard.DirtyNodeMask,
-					Shard.NodeParamDirtyBitsByNode,
-					Shard.DirtyNodeParamSlotsByNode,
-					bUploadSkeletonStatic,
-					Cache->ParentIndices,
-					Cache->InverseRefPoseTRS);
-
-				// Optional shared resources: GT provides the per-node key mapping; RT uploads/binds from global cache.
-				Uploads.MaxOptionalSRVSlot = Group.MaxOptionalSRVSlot;
-				if (Group.MaxOptionalSRVSlot >= 0)
-				{
-					Uploads.OptionalSRVKeyByNodeBySlot = Group.OptionalSRVKeyByNodeBySlot;
-				}
-				if (bUploadSkeletonStatic)
-				{
-					Shard.bSentSkeletonStaticUpload = true;
-				}
-
-				FGIAG_RenderPayload Payload;
-				Payload.Compiled = Group.Compiled;
-				Payload.Params = Params;
-				Payload.Uploads = MoveTemp(Uploads);
-
-				TRefCountPtr<FGIAG_TransformProviderState> State = Shard.TransformProvider->GetState();
-				ENQUEUE_RENDER_COMMAND(GIAG_SetProviderPayload)(
-					[State, Payload = MoveTemp(Payload)](FRHICommandListImmediate& RHICmdList) mutable
-					{
-						if (State.IsValid())
-						{
-							State->EnqueuePayload_RenderThread(MoveTemp(Payload));
-						}
-					});
+				continue;
 			}
+
+			auto TransformUpload = MakeShared<FGIAG_TransformUploadData>();
+			TransformUpload->SlotCapacity = (uint32)TotalCapacity;
+			bool bHasTransformDirty = false;
+
+			DebugTotalAlive = Bucket.GpuAliveSlots.Num();
+
+			Bucket.GpuActiveInstanceIndices.Reset();
+			if (Bucket.GpuAliveSlots.Num() == 0)
+			{
+				// no-op
+			}
+			else if (!bEnableFrustumCull)
+			{
+				Bucket.GpuActiveInstanceIndices = Bucket.GpuAliveSlots;
+			}
+			else
+			{
+				Bucket.GpuActiveInstanceIndices.Reserve(Bucket.GpuAliveSlots.Num());
+				for (const uint32 SlotU : Bucket.GpuAliveSlots)
+				{
+					const int32 BucketSlot = (int32)SlotU;
+					const FVector Center = Bucket.TransformBySlot[BucketSlot].GetLocation();
+					float Radius = MinRadius;
+					const float Scale3D = Bucket.TransformBySlot[BucketSlot].GetScale3D().GetAbsMax();
+					Radius = FMath::Max(Radius, (float)Bucket.BoundSphereRadius * Scale3D);
+					Radius += CullPadding;
+					if (ViewFrustum->IntersectSphere(Center, Radius))
+					{
+						Bucket.GpuActiveInstanceIndices.Add(SlotU);
+					}
+				}
+			}
+
+			const auto& ActiveIndices = Bucket.GpuActiveInstanceIndices;
+			DebugTotalActive = ActiveIndices.Num();
+
+			if (Bucket.DirtyTransformSlots.Num() > 0 || Bucket.NewSlotsThisTick.Num() > 0)
+			{
+				bHasTransformDirty = true;
+				for (const uint32 SlotU : Bucket.DirtyTransformSlots)
+				{
+					const int32 BucketSlot = (int32)SlotU;
+					if (Bucket.TransformDirty[BucketSlot])
+					{
+						Bucket.TransformDirty[BucketSlot] = false;
+						TransformUpload->DirtyComponentToWorld.Add(FTransform3f(Bucket.TransformBySlot[BucketSlot]));
+						TransformUpload->DirtySlots.Add(SlotU);
+					}
+				}
+				Bucket.DirtyTransformSlots.Reset();
+
+				if (Bucket.NewSlotsThisTick.Num() > 0)
+				{
+					if (TransformUpload->InitPrevBySlot.Num() == 0)
+					{
+						TransformUpload->InitPrevBySlot.SetNumZeroed(TotalCapacity);
+					}
+					for (const uint32 NewSlotU : Bucket.NewSlotsThisTick)
+					{
+						TransformUpload->InitPrevBySlot[(int32)NewSlotU] = 1u;
+					}
+					Bucket.NewSlotsThisTick.Reset();
+				}
+			}
+
+			if (ActiveIndices.Num() == 0)
+			{
+				if (bDebugShards)
+				{
+					UE_LOG(LogTemp, Log, TEXT("GIAG GT: Group=%d Bucket=%d Shards=%d AliveSlots=%d ActiveSlots=0 Cull=%d"),
+						GroupIndex, BucketIndex, Bucket.Shards.Num(), DebugTotalAlive, (int32)bEnableFrustumCull);
+				}
+				continue;
+			}
+
+			FGIAG_AnimGraphRunParams Params;
+			Params.NumInstances = ActiveIndices.Num();
+			Params.SlotCapacity = TotalCapacity;
+			Params.NumBones = Group.NumBones;
+			static_assert(sizeof(Params.TimeSlots) == sizeof(TimeSlots));
+			FMemory::Memcpy(Params.TimeSlots, TimeSlots, sizeof(TimeSlots));
+			Params.TimeSlotIndexBySlot = Bucket.TimeSlotIndexBySlot;
+			Params.Skeleton = Group.Skeleton;
+			Params.ParentIndices = &Cache->ParentIndices;
+			Params.InverseRefPoseTRS = &Cache->InverseRefPoseTRS;
+			Params.ActiveInstanceIndices = ActiveIndices;
+			Params.NumShards = Bucket.GetTotalSlotCapacity() / GIAG::DefaultSlotsPerShard;
+
+			// Debug readback requests (bucket SlotIndex values).
+			if (DebugReadbackEnabledSerialByRecordIndex.Num() > 0 || DebugNeedNodeBitsReadbackEnabledSerialByRecordIndex.Num() > 0)
+			{
+				Params.DebugCpuRequestFrame = GFrameCounter;
+				for (const uint32 SlotU : Params.ActiveInstanceIndices)
+				{
+					const int32 BucketSlot = (int32)SlotU;
+
+					const int32 RecordIndex = Bucket.RecordIndexBySlot[BucketSlot];
+					if (RecordIndex == INDEX_NONE) continue;
+					const FInstancedAnimRecord& Rec = AnimRecords[RecordIndex];
+					if (Rec.MasterRecordIndex != INDEX_NONE) continue;
+
+					if (const int32* EnabledSerial = DebugReadbackEnabledSerialByRecordIndex.Find(RecordIndex))
+					{
+						if (*EnabledSerial == AnimRecordSerials[RecordIndex])
+						{
+							FGIAG_LocalPoseReadbackRequest Req;
+							Req.RecordIndex = RecordIndex;
+							Req.SerialNumber = *EnabledSerial;
+							Req.SlotIndex = (uint32)BucketSlot;
+							Params.DebugLocalPoseReadbackRequests.Add(MoveTemp(Req));
+						}
+					}
+					if (const int32* EnabledSerial = DebugNeedNodeBitsReadbackEnabledSerialByRecordIndex.Find(RecordIndex))
+					{
+						if (*EnabledSerial == AnimRecordSerials[RecordIndex])
+						{
+							FGIAG_NeedNodeBitsReadbackRequest Req;
+							Req.RecordIndex = RecordIndex;
+							Req.SerialNumber = *EnabledSerial;
+							Req.SlotIndex = (uint32)BucketSlot;
+							Params.DebugNeedNodeBitsReadbackRequests.Add(MoveTemp(Req));
+						}
+					}
+				}
+			}
+
+			Params.AnimLibraryUpload = Cache->PendingAnimLibraryUpload;
+			Params.AnimLibraryVersion = Cache->AnimLibraryVersion;
+			Params.NumClips = (uint32)Cache->ClipSlots.Num();
+			Params.AnimTRSNum = (uint32)Cache->AnimTRSCapacity;
+
+			checkf(Params.AnimLibraryVersion != 0 && Params.NumClips != 0 && Params.AnimTRSNum != 0 && Group.NumBones > 0,
+				TEXT("GIAG: AnimLibrary not ready for Skeleton '%s'."), *GetNameSafe(Cache->Skeleton));
+
+			if (bHasTransformDirty)
+			{
+				Params.TransformUpload = TransformUpload;
+			}
+
+			const bool bUploadSkeletonStatic = !Bucket.bSentSkeletonStaticUpload;
+			FGIAG_AnimGraphUploads Uploads = Bucket.UploadBuilder.BuildUploads_GameThread(
+				*Group.Compiled,
+				Bucket.NodeBasePtrsByNode,
+				Bucket.NodeStrideBytes,
+				TotalCapacity,
+				Params,
+				Bucket.DirtyNodeIndices,
+				Bucket.DirtyNodeMask,
+				Bucket.NodeParamDirtyBitsByNode,
+				Bucket.DirtyNodeParamSlotsByNode,
+				bUploadSkeletonStatic,
+				Cache->ParentIndices,
+				Cache->InverseRefPoseTRS,
+				0);
+
+			// Optional shared resources.
+			Uploads.MaxOptionalSRVSlot = Group.MaxOptionalSRVSlot;
+			if (Group.MaxOptionalSRVSlot >= 0)
+			{
+				Uploads.OptionalSRVKeyByNodeBySlot = Group.OptionalSRVKeyByNodeBySlot;
+			}
+			if (bUploadSkeletonStatic)
+			{
+				Bucket.bSentSkeletonStaticUpload = true;
+			}
+
+			Params.DebugGraphName = GetNameSafe(Group.AnimGraph);
+			Params.DebugMeshName = GetNameSafe(Bucket.SkeletalMesh);
+
+			FGIAG_RenderPayload Payload;
+			Payload.Compiled = Group.Compiled;
+			Payload.Params = MoveTemp(Params);
+			Payload.Uploads = MoveTemp(Uploads);
+
+			TRefCountPtr<FGIAG_TransformProviderState> State = Bucket.SharedState;
+			ENQUEUE_RENDER_COMMAND(GIAG_SetProviderPayload)(
+				[State, Payload = MoveTemp(Payload)](FRHICommandListImmediate& RHICmdList) mutable
+				{
+					State->EnqueuePayload_RenderThread(MoveTemp(Payload));
+				});
 
 			if (bDebugShards)
 			{

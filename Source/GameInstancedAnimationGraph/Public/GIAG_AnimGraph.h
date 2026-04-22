@@ -148,6 +148,8 @@ struct FGIAG_AnimGraphCompiledData
 	FGIAG_AnimOutputPinRef FinalPoseOutput;
 	/** Final pose resource resolved by compiler (forced to ComponentPose). */
 	int32 FinalPoseResource = INDEX_NONE;
+	/** Pre-conversion LocalPose resource (before the compiler-inserted Local→Component conversion). */
+	int32 FinalLocalPoseResource = INDEX_NONE;
 	/** Final pose space resolved by compiler. */
 	EGIAG_AnimPinType FinalPoseType = EGIAG_AnimPinType::LocalPose;
 

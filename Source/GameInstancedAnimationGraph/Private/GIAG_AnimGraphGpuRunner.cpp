@@ -158,74 +158,78 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 		FRDGBufferDesc::CreateStructuredDesc(sizeof(FGIAG_Transform), Params.SlotCapacity),
 		TEXT("GIAG_AG_ComponentToWorldBySlot"));
 
-	if (Uploads.bUploadSkeleton)
 	{
-		CountUpload((uint64)sizeof(int32) * (uint64)Uploads.ParentIndices.Num());
-		CountUpload((uint64)sizeof(FGIAG_BoneTRS) * (uint64)Uploads.InverseRefPoseTRS.Num());
-		UploadStructuredBuffer(GraphBuilder, ParentRDG, 0, TEXT("GIAG_AG_UploadParent"), sizeof(int32), Uploads.ParentIndices.GetData(), Uploads.ParentIndices.Num());
-		UploadStructuredBuffer(GraphBuilder, InvRDG, 0, TEXT("GIAG_AG_UploadInvRef"), sizeof(FGIAG_BoneTRS), Uploads.InverseRefPoseTRS.GetData(), Uploads.InverseRefPoseTRS.Num());
-	}
+		RDG_EVENT_SCOPE(GraphBuilder, "Upload");
 
-	// Per-slot transforms
-	if (Params.TransformUpload.IsValid() && Params.TransformUpload->DirtySlots.Num() > 0)
-	{
-		const FGIAG_TransformUploadData& TransformUp = *Params.TransformUpload;
-		checkf((int32)TransformUp.SlotCapacity == Params.SlotCapacity,
-			TEXT("GIAG: TransformUpload SlotCapacity mismatch (Upload=%u Params=%d)."),
-			TransformUp.SlotCapacity, Params.SlotCapacity);
-		checkf(TransformUp.DirtySlots.Num() == TransformUp.DirtyComponentToWorld.Num(),
-			TEXT("GIAG: TransformUpload arrays mismatch (Slots=%d Transforms=%d)."),
-			TransformUp.DirtySlots.Num(), TransformUp.DirtyComponentToWorld.Num());
-
-		const int32 NumDirty = TransformUp.DirtySlots.Num();
-		check(NumDirty > 0);
-
-		TArray<uint32> SlotIndices;
-		TArray<FGIAG_Transform> ValuesC2W;
-		TArray<FGIAG_Transform> ValuesW2C;
-		SlotIndices.SetNumUninitialized(NumDirty);
-		ValuesC2W.SetNumUninitialized(NumDirty);
-		ValuesW2C.SetNumUninitialized(NumDirty);
-
-		for (int32 Idx = 0; Idx < NumDirty; ++Idx)
+		if (Uploads.bUploadSkeleton)
 		{
-			const uint32 SlotU = TransformUp.DirtySlots[Idx];
-			checkf(SlotU < (uint32)Params.SlotCapacity, TEXT("GIAG: invalid dirty slot %u (Cap=%d)."), SlotU, Params.SlotCapacity);
-
-			const FTransform3f C2W = TransformUp.DirtyComponentToWorld[Idx];
-			const FTransform3f W2C = C2W.Inverse();
-
-			SlotIndices[Idx] = SlotU;
-			ValuesC2W[Idx] = C2W;
-			ValuesW2C[Idx] = W2C;
+			CountUpload((uint64)sizeof(int32) * (uint64)Uploads.ParentIndices.Num());
+			CountUpload((uint64)sizeof(FGIAG_BoneTRS) * (uint64)Uploads.InverseRefPoseTRS.Num());
+			UploadStructuredBuffer(GraphBuilder, ParentRDG, 0, TEXT("GIAG_AG_UploadParent"), sizeof(int32), Uploads.ParentIndices.GetData(), Uploads.ParentIndices.Num());
+			UploadStructuredBuffer(GraphBuilder, InvRDG, 0, TEXT("GIAG_AG_UploadInvRef"), sizeof(FGIAG_BoneTRS), Uploads.InverseRefPoseTRS.GetData(), Uploads.InverseRefPoseTRS.Num());
 		}
 
-		CountUpload(sizeof(uint32) * (uint64)NumDirty);
-		CountUpload(sizeof(FGIAG_Transform) * (uint64)NumDirty);
-		CountUpload(sizeof(FGIAG_Transform) * (uint64)NumDirty);
+		// Per-slot transforms
+		if (Params.TransformUpload.IsValid() && Params.TransformUpload->DirtySlots.Num() > 0)
+		{
+			const FGIAG_TransformUploadData& TransformUp = *Params.TransformUpload;
+			checkf((int32)TransformUp.SlotCapacity == Params.SlotCapacity,
+				TEXT("GIAG: TransformUpload SlotCapacity mismatch (Upload=%u Params=%d)."),
+				TransformUp.SlotCapacity, Params.SlotCapacity);
+			checkf(TransformUp.DirtySlots.Num() == TransformUp.DirtyComponentToWorld.Num(),
+				TEXT("GIAG: TransformUpload arrays mismatch (Slots=%d Transforms=%d)."),
+				TransformUp.DirtySlots.Num(), TransformUp.DirtyComponentToWorld.Num());
 
-		FRDGBufferRef IndicesRDG = GraphBuilder.CreateBuffer(
-			FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), FMath::Max(1, NumDirty)),
-			TEXT("GIAG_AG_ScatterTransformSlots"));
-		FRDGBufferRef ValuesC2WRDG = GraphBuilder.CreateBuffer(
-			FRDGBufferDesc::CreateStructuredDesc(sizeof(FGIAG_Transform), FMath::Max(1, NumDirty)),
-			TEXT("GIAG_AG_ScatterTransformValuesC2W"));
-		FRDGBufferRef ValuesW2CRDG = GraphBuilder.CreateBuffer(
-			FRDGBufferDesc::CreateStructuredDesc(sizeof(FGIAG_Transform), FMath::Max(1, NumDirty)),
-			TEXT("GIAG_AG_ScatterTransformValuesW2C"));
+			const int32 NumDirty = TransformUp.DirtySlots.Num();
+			check(NumDirty > 0);
 
-		GraphBuilder.QueueBufferUpload(IndicesRDG, SlotIndices.GetData(), sizeof(uint32) * NumDirty, ERDGInitialDataFlags::None);
-		GraphBuilder.QueueBufferUpload(ValuesC2WRDG, ValuesC2W.GetData(), sizeof(FGIAG_Transform) * NumDirty, ERDGInitialDataFlags::None);
-		GraphBuilder.QueueBufferUpload(ValuesW2CRDG, ValuesW2C.GetData(), sizeof(FGIAG_Transform) * NumDirty, ERDGInitialDataFlags::None);
+			TArray<uint32> SlotIndices;
+			TArray<FGIAG_Transform> ValuesC2W;
+			TArray<FGIAG_Transform> ValuesW2C;
+			SlotIndices.SetNumUninitialized(NumDirty);
+			ValuesC2W.SetNumUninitialized(NumDirty);
+			ValuesW2C.SetNumUninitialized(NumDirty);
 
-		GIAG::FScatterWriteTransformsBySlotPassParams ScatterParams;
-		ScatterParams.NumWrites = (uint32)NumDirty;
-		ScatterParams.OutputIndices = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(IndicesRDG, PF_R32_UINT));
-		ScatterParams.ValuesComponentToWorld = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(ValuesC2WRDG));
-		ScatterParams.ValuesWorldToComponent = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(ValuesW2CRDG));
-		ScatterParams.RW_ComponentToWorldBySlot = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(ComponentToWorldRDG));
-		ScatterParams.RW_WorldToComponentBySlot = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(WorldToComponentRDG));
-		GIAG::AddScatterWriteTransformsBySlotPasses(GraphBuilder, ScatterParams);
+			for (int32 Idx = 0; Idx < NumDirty; ++Idx)
+			{
+				const uint32 SlotU = TransformUp.DirtySlots[Idx];
+				checkf(SlotU < (uint32)Params.SlotCapacity, TEXT("GIAG: invalid dirty slot %u (Cap=%d)."), SlotU, Params.SlotCapacity);
+
+				const FTransform3f C2W = TransformUp.DirtyComponentToWorld[Idx];
+				const FTransform3f W2C = C2W.Inverse();
+
+				SlotIndices[Idx] = SlotU;
+				ValuesC2W[Idx] = C2W;
+				ValuesW2C[Idx] = W2C;
+			}
+
+			CountUpload(sizeof(uint32) * (uint64)NumDirty);
+			CountUpload(sizeof(FGIAG_Transform) * (uint64)NumDirty);
+			CountUpload(sizeof(FGIAG_Transform) * (uint64)NumDirty);
+
+			FRDGBufferRef IndicesRDG = GraphBuilder.CreateBuffer(
+				FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), FMath::Max(1, NumDirty)),
+				TEXT("GIAG_AG_ScatterTransformSlots"));
+			FRDGBufferRef ValuesC2WRDG = GraphBuilder.CreateBuffer(
+				FRDGBufferDesc::CreateStructuredDesc(sizeof(FGIAG_Transform), FMath::Max(1, NumDirty)),
+				TEXT("GIAG_AG_ScatterTransformValuesC2W"));
+			FRDGBufferRef ValuesW2CRDG = GraphBuilder.CreateBuffer(
+				FRDGBufferDesc::CreateStructuredDesc(sizeof(FGIAG_Transform), FMath::Max(1, NumDirty)),
+				TEXT("GIAG_AG_ScatterTransformValuesW2C"));
+
+			GraphBuilder.QueueBufferUpload(IndicesRDG, SlotIndices.GetData(), sizeof(uint32) * NumDirty, ERDGInitialDataFlags::None);
+			GraphBuilder.QueueBufferUpload(ValuesC2WRDG, ValuesC2W.GetData(), sizeof(FGIAG_Transform) * NumDirty, ERDGInitialDataFlags::None);
+			GraphBuilder.QueueBufferUpload(ValuesW2CRDG, ValuesW2C.GetData(), sizeof(FGIAG_Transform) * NumDirty, ERDGInitialDataFlags::None);
+
+			GIAG::FScatterWriteTransformsBySlotPassParams ScatterParams;
+			ScatterParams.NumWrites = (uint32)NumDirty;
+			ScatterParams.OutputIndices = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(IndicesRDG, PF_R32_UINT));
+			ScatterParams.ValuesComponentToWorld = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(ValuesC2WRDG));
+			ScatterParams.ValuesWorldToComponent = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(ValuesW2CRDG));
+			ScatterParams.RW_ComponentToWorldBySlot = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(ComponentToWorldRDG));
+			ScatterParams.RW_WorldToComponentBySlot = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(WorldToComponentRDG));
+			GIAG::AddScatterWriteTransformsBySlotPasses(GraphBuilder, ScatterParams);
+		}
 	}
 
 	// AnimLibrary buffers are owned by RT cache; runner only consumes them.
@@ -303,39 +307,42 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 	}
 
 	// Upload sparse node params by index (scatter packed bytes).
-	for (const FGIAG_AnimGraphNodeUploadRun& Run : Uploads.NodeRuns)
 	{
-		checkf(Run.NodeIndex >= 0 && Run.NodeIndex < NodeParamRDGs.Num(), TEXT("GIAG: invalid NodeIndex=%d in upload run."), Run.NodeIndex);
-		checkf(Run.StrideBytes > 0, TEXT("GIAG: invalid StrideBytes in node upload (Node=%d)."), Run.NodeIndex);
-		checkf((Run.StrideBytes % 4u) == 0u, TEXT("GIAG: node param stride must be multiple of 4 for scatter upload (Node=%d Stride=%u)."), Run.NodeIndex, Run.StrideBytes);
-		checkf(Run.InstanceIndices.Num() > 0, TEXT("GIAG: empty InstanceIndices in node upload (Node=%d)."), Run.NodeIndex);
-		checkf((uint64)Run.Bytes.Num() == (uint64)Run.StrideBytes * (uint64)Run.InstanceIndices.Num(),
-			TEXT("GIAG: node upload byte size mismatch (Node=%d Bytes=%d Stride=%u Indices=%d)."),
-			Run.NodeIndex, Run.Bytes.Num(), Run.StrideBytes, Run.InstanceIndices.Num());
+		RDG_EVENT_SCOPE(GraphBuilder, "Upload");
+		for (const FGIAG_AnimGraphNodeUploadRun& Run : Uploads.NodeRuns)
+		{
+			checkf(Run.NodeIndex >= 0 && Run.NodeIndex < NodeParamRDGs.Num(), TEXT("GIAG: invalid NodeIndex=%d in upload run."), Run.NodeIndex);
+			checkf(Run.StrideBytes > 0, TEXT("GIAG: invalid StrideBytes in node upload (Node=%d)."), Run.NodeIndex);
+			checkf((Run.StrideBytes % 4u) == 0u, TEXT("GIAG: node param stride must be multiple of 4 for scatter upload (Node=%d Stride=%u)."), Run.NodeIndex, Run.StrideBytes);
+			checkf(Run.InstanceIndices.Num() > 0, TEXT("GIAG: empty InstanceIndices in node upload (Node=%d)."), Run.NodeIndex);
+			checkf((uint64)Run.Bytes.Num() == (uint64)Run.StrideBytes * (uint64)Run.InstanceIndices.Num(),
+				TEXT("GIAG: node upload byte size mismatch (Node=%d Bytes=%d Stride=%u Indices=%d)."),
+				Run.NodeIndex, Run.Bytes.Num(), Run.StrideBytes, Run.InstanceIndices.Num());
 
-		const uint32 NumWrites = (uint32)Run.InstanceIndices.Num();
-		const uint64 TotalBytes = (uint64)Run.StrideBytes * (uint64)NumWrites;
-		CountUpload((uint64)sizeof(uint32) * (uint64)NumWrites);
-		CountUpload(TotalBytes);
+			const uint32 NumWrites = (uint32)Run.InstanceIndices.Num();
+			const uint64 TotalBytes = (uint64)Run.StrideBytes * (uint64)NumWrites;
+			CountUpload((uint64)sizeof(uint32) * (uint64)NumWrites);
+			CountUpload(TotalBytes);
 
-		FRDGBufferRef IndicesRDG = GraphBuilder.CreateBuffer(
-			FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), FMath::Max(1u, NumWrites)),
-			TEXT("GIAG_AG_NodeParamScatterIndices"));
-		GraphBuilder.QueueBufferUpload(IndicesRDG, Run.InstanceIndices.GetData(), sizeof(uint32) * NumWrites, ERDGInitialDataFlags::None);
+			FRDGBufferRef IndicesRDG = GraphBuilder.CreateBuffer(
+				FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), FMath::Max(1u, NumWrites)),
+				TEXT("GIAG_AG_NodeParamScatterIndices"));
+			GraphBuilder.QueueBufferUpload(IndicesRDG, Run.InstanceIndices.GetData(), sizeof(uint32) * NumWrites, ERDGInitialDataFlags::None);
 
-		const uint32 NumDwords = (uint32)((TotalBytes + 3ull) / 4ull);
-		FRDGBufferDesc ValuesDesc = FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), FMath::Max(1u, NumDwords));
-		ValuesDesc.Usage |= (BUF_ShaderResource | BUF_ByteAddressBuffer);
-		FRDGBufferRef ValuesRDG = GraphBuilder.CreateBuffer(ValuesDesc, TEXT("GIAG_AG_NodeParamScatterValuesBytes"));
-		GraphBuilder.QueueBufferUpload(ValuesRDG, Run.Bytes.GetData(), (uint32)TotalBytes, ERDGInitialDataFlags::None);
+			const uint32 NumDwords = (uint32)((TotalBytes + 3ull) / 4ull);
+			FRDGBufferDesc ValuesDesc = FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), FMath::Max(1u, NumDwords));
+			ValuesDesc.Usage |= (BUF_ShaderResource | BUF_ByteAddressBuffer);
+			FRDGBufferRef ValuesRDG = GraphBuilder.CreateBuffer(ValuesDesc, TEXT("GIAG_AG_NodeParamScatterValuesBytes"));
+			GraphBuilder.QueueBufferUpload(ValuesRDG, Run.Bytes.GetData(), (uint32)TotalBytes, ERDGInitialDataFlags::None);
 
-		GIAG::FScatterWriteBytesByIndexPassParams ScatterParams;
-		ScatterParams.NumWrites = NumWrites;
-		ScatterParams.StrideBytes = Run.StrideBytes;
-		ScatterParams.OutputIndices = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(IndicesRDG, PF_R32_UINT));
-		ScatterParams.ValuesBytes = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(ValuesRDG, PF_R32_UINT));
-		ScatterParams.RW_DstBytes = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(NodeParamRDGs[Run.NodeIndex], PF_R32_UINT));
-		GIAG::AddScatterWriteBytesByIndexPasses(GraphBuilder, ScatterParams);
+			GIAG::FScatterWriteBytesByIndexPassParams ScatterParams;
+			ScatterParams.NumWrites = NumWrites;
+			ScatterParams.StrideBytes = Run.StrideBytes;
+			ScatterParams.OutputIndices = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(IndicesRDG, PF_R32_UINT));
+			ScatterParams.ValuesBytes = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(ValuesRDG, PF_R32_UINT));
+			ScatterParams.RW_DstBytes = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(NodeParamRDGs[Run.NodeIndex], PF_R32_UINT));
+			GIAG::AddScatterWriteBytesByIndexPasses(GraphBuilder, ScatterParams);
+		}
 	}
 
 	// SRVs for shared inputs.
@@ -349,6 +356,7 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 
 	Outputs.ParentIndicesSRV = ParentSRV;
 	Outputs.ComponentToWorldBySlotSRV = ComponentToWorldSRV;
+	Outputs.InverseRefPoseSRV = InvSRV;
 
 	// ActiveInstanceIndices is always-on (ActiveIndex -> SlotIndex).
 	const uint32 N = (uint32)Params.ActiveInstanceIndices.Num();
@@ -371,22 +379,25 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 
 	if (bUploadActive)
 	{
-		Resources.ActiveInstanceIndicesNum = N;
-		Resources.ActiveInstanceIndicesCPU.SetNumUninitialized((int32)N);
-		if (N > 0)
 		{
-			FMemory::Memcpy(Resources.ActiveInstanceIndicesCPU.GetData(), Params.ActiveInstanceIndices.GetData(), (SIZE_T)sizeof(uint32) * (SIZE_T)N);
-		}
+			RDG_EVENT_SCOPE(GraphBuilder, "Upload");
+			Resources.ActiveInstanceIndicesNum = N;
+			Resources.ActiveInstanceIndicesCPU.SetNumUninitialized((int32)N);
+			if (N > 0)
+			{
+				FMemory::Memcpy(Resources.ActiveInstanceIndicesCPU.GetData(), Params.ActiveInstanceIndices.GetData(), (SIZE_T)sizeof(uint32) * (SIZE_T)N);
+			}
 
-		CountUpload((uint64)sizeof(uint32) * (uint64)N);
-		UploadStructuredBuffer(
-			GraphBuilder,
-			ActiveRDG,
-			0,
-			TEXT("GIAG_AG_UploadActiveInstanceIndices"),
-			sizeof(uint32),
-			Resources.ActiveInstanceIndicesCPU.GetData(),
-			N);
+			CountUpload((uint64)sizeof(uint32) * (uint64)N);
+			UploadStructuredBuffer(
+				GraphBuilder,
+				ActiveRDG,
+				0,
+				TEXT("GIAG_AG_UploadActiveInstanceIndices"),
+				sizeof(uint32),
+				Resources.ActiveInstanceIndicesCPU.GetData(),
+				N);
+		}
 	}
 
 	FRDGBufferSRVRef ActiveIndicesSRV = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(ActiveRDG));
@@ -409,22 +420,25 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 		}
 		if (bUploadTSI && SrcNum > 0)
 		{
-			Resources.TimeSlotIndicesCPU.SetNumUninitialized(SrcNum);
-			FMemory::Memcpy(Resources.TimeSlotIndicesCPU.GetData(), Params.TimeSlotIndexBySlot.GetData(), (SIZE_T)SrcNum);
+			{
+				RDG_EVENT_SCOPE(GraphBuilder, "Upload");
+				Resources.TimeSlotIndicesCPU.SetNumUninitialized(SrcNum);
+				FMemory::Memcpy(Resources.TimeSlotIndicesCPU.GetData(), Params.TimeSlotIndexBySlot.GetData(), (SIZE_T)SrcNum);
 
-			TArray<uint32, TInlineAllocator<128>> Expanded;
-			Expanded.SetNumUninitialized(SrcNum);
-			for (int32 i = 0; i < SrcNum; ++i) { Expanded[i] = (uint32)Resources.TimeSlotIndicesCPU[i]; }
+				TArray<uint32, TInlineAllocator<128>> Expanded;
+				Expanded.SetNumUninitialized(SrcNum);
+				for (int32 i = 0; i < SrcNum; ++i) { Expanded[i] = (uint32)Resources.TimeSlotIndicesCPU[i]; }
 
-			CountUpload((uint64)sizeof(uint32) * (uint64)SrcNum);
-			UploadStructuredBuffer(
-				GraphBuilder,
-				TimeSlotIdxRDG,
-				0,
-				TEXT("GIAG_AG_UploadTimeSlotIndices"),
-				sizeof(uint32),
-				Expanded.GetData(),
-				(uint32)SrcNum);
+				CountUpload((uint64)sizeof(uint32) * (uint64)SrcNum);
+				UploadStructuredBuffer(
+					GraphBuilder,
+					TimeSlotIdxRDG,
+					0,
+					TEXT("GIAG_AG_UploadTimeSlotIndices"),
+					sizeof(uint32),
+					Expanded.GetData(),
+					(uint32)SrcNum);
+			}
 		}
 	}
 
@@ -458,40 +472,44 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 	// Run culling prepass (GPU). If there is no final node, disable culling by filling all ones.
 	const bool bShouldRunGraphCull = bHasFinalNode && CompiledData.bEnableNodeCull && CompiledData.GraphCullShaderMap.IsValid();
 
-	if (bShouldRunGraphCull)
 	{
-		// Build cull param SRVs in the exact declaration order for this permutation.
-		TArray<FRDGBufferSRVRef> CullParamsInDeclOrder;
-		CullParamsInDeclOrder.SetNumZeroed(CompiledData.CullParamNodeIndices.Num());
-		for (int32 i = 0; i < CompiledData.CullParamNodeIndices.Num(); ++i)
+		RDG_EVENT_SCOPE(GraphBuilder, "GraphCull");
+
+		if (bShouldRunGraphCull)
 		{
-			const int32 NodeIdx = CompiledData.CullParamNodeIndices[i];
-			checkf(NodeIdx >= 0 && NodeIdx < CompiledData.NumNodes, TEXT("GIAG: invalid CullParamNodeIndex=%d."), NodeIdx);
-			checkf(NodeParamRDGs.IsValidIndex(NodeIdx) && NodeParamRDGs[NodeIdx] != nullptr, TEXT("GIAG: missing NodeParamRDG for cull param node %d."), NodeIdx);
-			CullParamsInDeclOrder[i] = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(NodeParamRDGs[NodeIdx]));
+			// Build cull param SRVs in the exact declaration order for this permutation.
+			TArray<FRDGBufferSRVRef> CullParamsInDeclOrder;
+			CullParamsInDeclOrder.SetNumZeroed(CompiledData.CullParamNodeIndices.Num());
+			for (int32 i = 0; i < CompiledData.CullParamNodeIndices.Num(); ++i)
+			{
+				const int32 NodeIdx = CompiledData.CullParamNodeIndices[i];
+				checkf(NodeIdx >= 0 && NodeIdx < CompiledData.NumNodes, TEXT("GIAG: invalid CullParamNodeIndex=%d."), NodeIdx);
+				checkf(NodeParamRDGs.IsValidIndex(NodeIdx) && NodeParamRDGs[NodeIdx] != nullptr, TEXT("GIAG: missing NodeParamRDG for cull param node %d."), NodeIdx);
+				CullParamsInDeclOrder[i] = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(NodeParamRDGs[NodeIdx]));
+			}
+
+			GIAG::FGraphCullPassParams CullParams;
+			CullParams.ShaderMap = CompiledData.GraphCullShaderMap;
+			CullParams.NumNodes = (uint32)CompiledData.NumNodes;
+			CullParams.NumInstances = (uint32)Params.NumInstances;
+			CullParams.SlotCapacity = (uint32)Params.SlotCapacity;
+			CullParams.WordsPerSlot = NeedNodeWordsPerSlot;
+			CullParams.FinalNodeIndex = (uint32)CompiledData.FinalPoseOutput.NodeIndex;
+			CullParams.ActiveInstanceIndices = ActiveIndicesSRV;
+			CullParams.CullParams = CullParamsInDeclOrder;
+			CullParams.RW_NeedNodeBits = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(NeedNodeBitsRDG));
+			GIAG::AddGraphCullPasses(GraphBuilder, CullParams);
+
 		}
-
-		GIAG::FGraphCullPassParams CullParams;
-		CullParams.ShaderMap = CompiledData.GraphCullShaderMap;
-		CullParams.NumNodes = (uint32)CompiledData.NumNodes;
-		CullParams.NumInstances = (uint32)Params.NumInstances;
-		CullParams.SlotCapacity = (uint32)Params.SlotCapacity;
-		CullParams.WordsPerSlot = NeedNodeWordsPerSlot;
-		CullParams.FinalNodeIndex = (uint32)CompiledData.FinalPoseOutput.NodeIndex;
-		CullParams.ActiveInstanceIndices = ActiveIndicesSRV;
-		CullParams.CullParams = CullParamsInDeclOrder;
-		CullParams.RW_NeedNodeBits = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(NeedNodeBitsRDG));
-		GIAG::AddGraphCullPasses(GraphBuilder, CullParams);
-
-	}
-	else
-	{
-		// No GraphCull (disabled or no cull-capable nodes): mark all nodes needed.
-		GIAG::FFillUintBufferPassParams Fill;
-		Fill.NumDwords = FMath::Max(1u, NeedNodeTotalWords);
-		Fill.Value = 0xFFFFFFFFu;
-		Fill.RW_Out = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(NeedNodeBitsRDG));
-		GIAG::AddFillUintBufferPasses(GraphBuilder, Fill);
+		else
+		{
+			// No GraphCull (disabled or no cull-capable nodes): mark all nodes needed.
+			GIAG::FFillUintBufferPassParams Fill;
+			Fill.NumDwords = FMath::Max(1u, NeedNodeTotalWords);
+			Fill.Value = 0xFFFFFFFFu;
+			Fill.RW_Out = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(NeedNodeBitsRDG));
+			GIAG::AddFillUintBufferPasses(GraphBuilder, Fill);
+		}
 	}
 
 	// Execute schedule.
@@ -642,7 +660,7 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 		FGIAG_AnimNodeDispatchContext DispatchContext
 		{
 			.GraphBuilder = GraphBuilder,
-			.TimeSlots = Params.TimeSlots,
+			.TimeSlots = MakeArrayView(Params.TimeSlots),
 			.TimeSlotIndicesSRV = TimeSlotIndicesSRV,
 			.NumInstances = Params.NumInstances,
 			.NumBones = Params.NumBones,
@@ -663,7 +681,11 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 			.OutputPosesPerNode = OutViews,
 			.InputBoneWeightsPerNode = TConstArrayView<TConstArrayView<FGIAG_RDGBoneWeights>>(),
 		};
-		NodeMeta->AddPassesGPU(DispatchContext);
+		{
+			const FString& NodeTypeName = NodeMeta->GetStruct()->GetName();
+			RDG_EVENT_SCOPE(GraphBuilder, "Node_%s", *NodeTypeName);
+			NodeMeta->AddPassesGPU(DispatchContext);
+		}
 	}
 
 	// Finalize:
@@ -680,12 +702,13 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 		{
 			Outputs.FinalPoseBuffer = PoseRDGs[FinalPoseRes];
 			Outputs.FinalPoseType = FinalPoseType;
-			Outputs.FinalLocalPoseBuffer = nullptr;
+			const int32 FinalLocalRes = CompiledData.FinalLocalPoseResource;
+			Outputs.FinalLocalPoseBuffer = (FinalLocalRes >= 0 && FinalLocalRes < PoseRDGs.Num())
+				? PoseRDGs[FinalLocalRes] : nullptr;
 
 			GIAG::FPoseToTransformBufferPassParams TBParams;
 			TBParams.NumBones = (uint32)Params.NumBones;
 			TBParams.NumInstances = (uint32)Params.NumInstances;
-			TBParams.TransformOffset = Params.TransformBufferOffset;
 			TBParams.ActiveInstanceIndices = ActiveIndicesSRV;
 			TBParams.InverseRefPoseTRS = InvSRV;
 			TBParams.PoseTRS = PoseSRVs[FinalPoseRes];
@@ -706,6 +729,20 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 					Params.TransformUpload->InitPrevBySlot.GetData(),
 					NumBytes);
 				TBParams.InitPrevBySlot = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(InitPrevRDG, PF_R32_UINT));
+			}
+
+			TBParams.SlotsPerShard = (uint32)Params.SlotsPerShard;
+			checkf(Params.ShardTransformOffsets.Num() > 0, TEXT("GIAG: ShardTransformOffsets must be set."));
+			{
+				const uint32 NumShards = (uint32)Params.ShardTransformOffsets.Num();
+				FRDGBufferRef ShardOffBuf = CreateStructuredBuffer(
+					GraphBuilder,
+					TEXT("GIAG_ShardTransformOffsets"),
+					sizeof(uint32),
+					NumShards,
+					Params.ShardTransformOffsets.GetData(),
+					(uint64)sizeof(uint32) * (uint64)NumShards);
+				TBParams.ShardTransformOffsets = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(ShardOffBuf, PF_R32_UINT));
 			}
 
 			GIAG::AddPoseToTransformBufferPasses(GraphBuilder, TBParams);

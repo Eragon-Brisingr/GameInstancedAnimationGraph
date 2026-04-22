@@ -37,6 +37,10 @@ public:
 		TArray<TArray<uint32>>& InOutDirtyNodeParamSlotsByNode,
 		bool bUploadSkeletonStatic,
 		const TArray<int32>& ParentIndices,
-		const TArray<FGIAG_BoneTRS>& InverseRefPoseTRS);
+		const TArray<FGIAG_BoneTRS>& InverseRefPoseTRS,
+		int32 SlotOffset = 0);
+
+	/** Merge another uploads result into an existing one (appends NodeRuns/ResourceRuns). */
+	static void MergeUploads(FGIAG_AnimGraphUploads& InOut, FGIAG_AnimGraphUploads&& Other);
 };
 

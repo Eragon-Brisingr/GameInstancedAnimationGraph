@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GIAG_AnimCommon.h"
+#include "GIAG_TimeSlot.h"
 #include "RenderGraphResources.h"
 
 #include "GIAG_AnimGraph.h"
@@ -215,7 +216,9 @@ struct FGIAG_AnimGraphRunParams
 	/** Total slot capacity for this group (stable, allows holes). GPU buffers are sized by SlotCapacity. */
 	int32 SlotCapacity = 0;
 	int32 NumBones = 0;
-	TConstArrayView<float> TimeSlots;
+
+	/** Owned copy of time slot values, snapshotted at GT payload creation time. */
+	float TimeSlots[GIAG_MAX_TIME_SLOTS] = {};
 
 	/** Source skeleton asset (identity / validation). */
 	USkeleton* Skeleton = nullptr;
@@ -230,11 +233,13 @@ struct FGIAG_AnimGraphRunParams
 	/** Optional active instance indices mapping (ActiveIndex -> AbsoluteInstanceIndex). */
 	TArray<uint32> ActiveInstanceIndices;
 
-	/** Per-slot TimeSlotIndex (SlotIndex -> TimeSlot index). Size == SlotCapacity. */
-	TConstArrayView<uint8> TimeSlotIndexBySlot;
+	/** Owned copy of per-slot TimeSlotIndex (SlotIndex -> TimeSlot index). Size == SlotCapacity. */
+	TArray<uint8> TimeSlotIndexBySlot;
 
 	/** Debug: monotonic frame id assigned on GT when this evaluation was submitted. */
 	uint64 DebugCpuRequestFrame = 0;
+	FString DebugGraphName;
+	FString DebugMeshName;
 	/** Debug: per-slot readback requests for this evaluation (MasterEvaluate only). */
 	TArray<FGIAG_LocalPoseReadbackRequest> DebugLocalPoseReadbackRequests;
 	/** Debug: per-slot NeedNodeBits readback requests for this evaluation (MasterEvaluate only). */
@@ -248,7 +253,14 @@ struct FGIAG_AnimGraphRunParams
 
 	/** Optional: output directly into UE SkinningSceneExtension TransformBuffer (RDG buffer). */
 	FRDGBufferRef OutputTransformBuffer = nullptr;
-	uint32 TransformBufferOffset = 0;
+
+	/** Shard layout for unified computation (multiple shards share one runner). */
+	static constexpr int32 SlotsPerShard = GIAG::DefaultSlotsPerShard;
+	int32 NumShards = 1;
+
+	/** Per-shard TransformBuffer byte offsets (built on RT from indirections). Size == NumShards.
+	 *  When set, PoseToTransformBuffer scatters to multiple regions. */
+	TArray<uint32> ShardTransformOffsets;
 };
 
 /**
@@ -279,6 +291,8 @@ public:
 		FRDGBufferSRVRef ComponentToWorldBySlotSRV = nullptr;
 		/** ActiveIndex -> SlotIndex mapping (StructuredBuffer<uint32>). */
 		FRDGBufferSRVRef ActiveInstanceIndicesSRV = nullptr;
+		/** Static skeleton inverse ref pose (StructuredBuffer<FGIAG_BoneTRS>). */
+		FRDGBufferSRVRef InverseRefPoseSRV = nullptr;
 	};
 
 	/** Render-thread: add all RDG passes for one evaluation to an existing GraphBuilder (caller executes). */

@@ -6,7 +6,6 @@
 UGIAG_TransformProviderData::UGIAG_TransformProviderData()
 {
 	bEnabled = true;
-	State = TRefCountPtr<FGIAG_TransformProviderState>(new FGIAG_TransformProviderState());
 	ConfigureAsMaster();
 }
 
@@ -42,11 +41,12 @@ void UGIAG_TransformProviderData::ConfigureAsFollower(
 	FGIAG_TransformProviderState* InMasterBridge,
 	int32 InNumBones,
 	int32 InSrcNumBones,
-	TSharedPtr<const TArray<uint32>> InBoneRemapShared)
+	TSharedPtr<const TArray<uint32>> InBoneRemapShared,
+	int32 InMasterShardIndex)
 {
-	// Multi-slot follower: instance.AnimationIndex selects slot; RT copies master slot -> follower slot.
 	Mode = EGIAG_TransformProviderMode::FollowerCopyOrRemap;
 	MasterState = InMasterBridge;
+	MasterShardIndex = InMasterShardIndex;
 	NumBones = FMath::Max(0, InNumBones);
 	SrcNumBones = FMath::Max(0, InSrcNumBones);
 	BoneRemapShared = MoveTemp(InBoneRemapShared);
@@ -63,6 +63,8 @@ FTransformProviderRenderProxy* UGIAG_TransformProviderData::CreateRenderThreadRe
 	ProviderData.NumBones = (uint32)FMath::Max(0, NumBones);
 	ProviderData.SrcNumBones = (uint32)FMath::Max(0, SrcNumBones);
 	ProviderData.BoneRemap = BoneRemapPtr;
+	ProviderData.ShardIndex = ShardIndex;
+	ProviderData.MasterShardIndex = (uint32)MasterShardIndex;
 
 	// Render proxy must hold refs to keep State/MasterState alive on RT.
 	class FGIAG_TransformProviderRenderProxyWithRefs final : public FTransformProviderRenderProxy

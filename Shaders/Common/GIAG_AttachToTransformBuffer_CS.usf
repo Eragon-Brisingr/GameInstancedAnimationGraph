@@ -10,6 +10,10 @@
 uint NumBones;
 uint NumAttachments;
 
+uint DispatchGroupCountX;
+uint DispatchGroupCountY;
+uint DispatchGroupOffset;
+
 StructuredBuffer<FGIAG_BoneTRS> PoseTRS; // slot-indexed, one per bone
 StructuredBuffer<FGIAG_Transform> ComponentToWorldBySlot; // slot-indexed
 
@@ -33,7 +37,8 @@ FGIAG_BoneTRS ReadPoseTRS(in uint SlotIndex, in uint BoneIndex)
 [numthreads(THREADS_X, 1, 1)]
 void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 {
-	const uint DispatchId = GroupId.x * THREADS_X + GroupIndex;
+	uint GroupLinear = DispatchGroupOffset + GroupId.x + GroupId.y * DispatchGroupCountX + GroupId.z * (DispatchGroupCountX * DispatchGroupCountY);
+	const uint DispatchId = GroupLinear * THREADS_X + GroupIndex;
 	if (DispatchId >= NumAttachments)
 	{
 		return;

@@ -6,9 +6,8 @@
 void FGIAG_AnimNodeRef::MarkDirty() const
 {
 	check(NodeIndex != INDEX_NONE);
-	auto& Buckets = System->Buckets[BucketIndex];
-	auto& Shard = Buckets.Shards[ShardIndex];
-	Shard.MarkNodeParamDirty(NodeIndex, SlotIndex);
+	auto& Bucket = System->Buckets[BucketIndex];
+	Bucket.MarkNodeParamDirty(NodeIndex, SlotIndex);
 }
 
 float FGIAG_AnimNodeRef::GetTimeSlotSeconds() const

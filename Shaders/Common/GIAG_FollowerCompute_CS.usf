@@ -1,0 +1,66 @@
+// Follower Pass 1: compute skin matrices from master PoseBuffer, write to temp buffer.
+// One unified dispatch covers ALL master slots (TotalSlotCapacity) regardless of shard count.
+// Grid: TotalSlotCapacity x NumBones (with tiling support)
+
+#include "/Engine/Public/Platform.ush"
+#include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
+
+uint NumBones;            // destination bone count
+uint SrcNumBones;         // source (master) bone count
+uint TotalSlotCapacity;   // master bucket total slots (across all shards)
+
+uint DispatchGroupCountX;
+uint DispatchGroupCountY;
+uint DispatchGroupOffset;
+
+StructuredBuffer<FGIAG_BoneTRS> PoseTRS;           // master unified PoseBuffer
+StructuredBuffer<FGIAG_BoneTRS> InverseRefPoseTRS;  // master InvRefPose
+
+StructuredBuffer<uint> BoneRemap; // size = NumBones (DestBone -> SrcBone)
+uint UseBoneRemap;
+
+// Output: pre-computed compressed bone transforms (3 float4 per bone per slot)
+RWBuffer<float4> RW_SkinCache; // size = TotalSlotCapacity * NumBones * 3
+
+[numthreads(64, 1, 1)]
+void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	uint GroupLinear = DispatchGroupOffset + GroupId.x + GroupId.y * DispatchGroupCountX + GroupId.z * (DispatchGroupCountX * DispatchGroupCountY);
+	uint DispatchId = GroupLinear * 64u + GroupIndex;
+
+	uint Total = TotalSlotCapacity * NumBones;
+	if (DispatchId >= Total)
+	{
+		return;
+	}
+
+	uint MasterSlot = DispatchId / NumBones;
+	uint DestBone = DispatchId - MasterSlot * NumBones;
+
+	uint SrcBone = DestBone;
+	if (UseBoneRemap != 0)
+	{
+		SrcBone = BoneRemap[DestBone];
+	}
+
+	uint CacheBase = (MasterSlot * NumBones + DestBone) * 3u;
+
+	bool bValidSrc = (SrcBone != 0xFFFFFFFFu) && (SrcBone < SrcNumBones);
+	if (!bValidSrc)
+	{
+		// Identity matrix as float3x4 rows
+		RW_SkinCache[CacheBase + 0u] = float4(1, 0, 0, 0);
+		RW_SkinCache[CacheBase + 1u] = float4(0, 1, 0, 0);
+		RW_SkinCache[CacheBase + 2u] = float4(0, 0, 1, 0);
+		return;
+	}
+
+	FGIAG_BoneTRS GlobalT = PoseTRS[MasterSlot * SrcNumBones + SrcBone];
+	FGIAG_BoneTRS InvRef = InverseRefPoseTRS[SrcBone];
+	FGIAG_BoneTRS SkinT = GIAG_MultiplyBoneTRS(InvRef, GlobalT);
+	float3x4 SkinM = GIAG_MatrixFromBoneTRS(SkinT);
+
+	RW_SkinCache[CacheBase + 0u] = SkinM[0];
+	RW_SkinCache[CacheBase + 1u] = SkinM[1];
+	RW_SkinCache[CacheBase + 2u] = SkinM[2];
+}

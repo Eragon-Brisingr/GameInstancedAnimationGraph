@@ -93,7 +93,7 @@ namespace
 				P->DispatchGroupOffset = (uint32)GroupOffset1D;
 
 				GraphBuilder.AddPass(
-					RDG_EVENT_NAME("GIAG_PoseAdditive_Chunk"),
+					RDG_EVENT_NAME("GIAG_Additive"),
 					P,
 					ERDGPassFlags::Compute,
 					[P, CS, GroupCount](FRHIComputeCommandList& RHICmdList)

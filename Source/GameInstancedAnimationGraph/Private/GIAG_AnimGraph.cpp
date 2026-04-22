@@ -567,10 +567,12 @@ const FGIAG_AnimGraphCompiledData& UGIAG_AnimGraph::Compile()
 		if (FinalPinType == EGIAG_AnimPinType::ComponentPose)
 		{
 			Compiled.FinalPoseResource = FinalPinPoseRes;
+			Compiled.FinalLocalPoseResource = INDEX_NONE;
 			Compiled.FinalPoseType = EGIAG_AnimPinType::ComponentPose;
 		}
 		else
 		{
+			Compiled.FinalLocalPoseResource = FinalPinPoseRes;
 			const int32 ConvertTaskIndex = GetOrAddPoseConvertTask(
 				FinalPinPoseRes,
 				EGIAG_AnimPinType::LocalPose,

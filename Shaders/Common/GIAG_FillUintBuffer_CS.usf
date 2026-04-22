@@ -4,12 +4,18 @@
 
 uint NumDwords;
 uint Value;
+
+uint DispatchGroupCountX;
+uint DispatchGroupCountY;
+uint DispatchGroupOffset;
+
 RWStructuredBuffer<uint> RW_Out;
 
 [numthreads(THREADS_X, 1, 1)]
 void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 {
-	uint Id = GroupId.x * THREADS_X + GroupIndex;
+	uint GroupLinear = DispatchGroupOffset + GroupId.x + GroupId.y * DispatchGroupCountX + GroupId.z * (DispatchGroupCountX * DispatchGroupCountY);
+	uint Id = GroupLinear * THREADS_X + GroupIndex;
 	if (Id >= NumDwords)
 	{
 		return;

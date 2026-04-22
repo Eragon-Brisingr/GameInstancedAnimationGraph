@@ -45,8 +45,11 @@ struct alignas(8) FGIAG_ProviderData
 	/** Optional: DestBoneIndex -> SrcBoneIndex remap table (size NumBones). Null => identity mapping. */
 	const uint32* BoneRemap = nullptr;
 
-	/** Reserved for future expansion (keeps size multiple of 8). */
-	uint64 Reserved = 0;
+	/** Shard index within the owning bucket (used by RT to build ShardTransformOffsets). */
+	uint32 ShardIndex = 0;
+
+	/** Follower-only: master shard index within the master's bucket (for PoseBuffer SrcSlotBase). */
+	uint32 MasterShardIndex = 0;
 
 	static constexpr int32 NumWords()
 	{

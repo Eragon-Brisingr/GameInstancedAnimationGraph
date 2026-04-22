@@ -189,14 +189,6 @@ private:
 	};
 	TMap<FBoneRemapKey, FBoneRemapRTCacheEntry> BoneRemapBufferByKey_RT;
 
-	/** RT-only: persistent upload+buffer for follower dst offsets (to reduce per-frame RDG transient buffers). */
-	struct FDstOffsetsRTCacheEntry
-	{
-		TRefCountPtr<FRDGPooledBuffer> Buffer;
-		TArray<uint32> CPU;
-	};
-	TMap<uint32, FDstOffsetsRTCacheEntry> DstOffsetsByHash_RT;
-
 	/** RT-only: per-scene resource cache (ShareKey -> external pooled buffer). */
 	FGIAG_AnimResourceCache AnimResourceCache_RT;
 };

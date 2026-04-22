@@ -368,7 +368,7 @@ struct GAMEINSTANCEDANIMATIONGRAPH_API FGIAG_AnimNodeRef
 	int32 RecordIndex = INDEX_NONE;
 	int32 GroupIndex = INDEX_NONE;
 	int32 BucketIndex = INDEX_NONE;
-	int32 ShardIndex = INDEX_NONE;
+	/** Bucket-wide slot index; indexes FMeshBucket arrays. */
 	int32 SlotIndex = INDEX_NONE;
 	int32 NodeIndex = INDEX_NONE;
 	

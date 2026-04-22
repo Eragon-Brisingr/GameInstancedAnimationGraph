@@ -501,127 +501,77 @@ private:
 		TUniquePtr<class FGIAG_AnimGraphCpuRunner> CpuRunner;
 	};
 
-	// IMPORTANT: This is not an arbitrary “binning” choice.
-	// UE 5.7 packs `FSkinningHeader::UniqueAnimationCount` into 7 bits (see Engine/Shaders/Shared/SkinningDefinitions.h),
-	// so a single instanced skinned mesh component can expose at most 127 unique animation slots.
-	// We therefore shard components so that each shard stays within this engine constraint.
-	static constexpr int32 DefaultSlotsPerShard = 127;
 	friend FGIAG_AnimNodeRef;
+
+	/** Thin shard: only holds the UE ISKMC rendering binding imposed by the 127-slot engine limit. */
 	struct FSkinnedShard
 	{
-		// Render component
 		UInstancedSkinnedMeshComponent* ISKMC = nullptr;
 		UGIAG_TransformProviderData* TransformProvider = nullptr;
+		int32 NumInstances = 0;
+	};
 
-		/** Number of live render instances in this shard (for per-shard cleanup). */
+	struct FMeshBucket
+	{
+		FMeshBucket() = default;
+		FMeshBucket(const FMeshBucket&) = delete;
+		FMeshBucket& operator=(const FMeshBucket&) = delete;
+		FMeshBucket(FMeshBucket&&) = default;
+		FMeshBucket& operator=(FMeshBucket&&) = default;
+
+		USkeletalMesh* SkeletalMesh = nullptr;
+		int32 GroupIndex = INDEX_NONE;
+		double BoundSphereRadius = 0.0;
+
+		TSparseArray<FSkinnedShard> Shards;
 		int32 NumInstances = 0;
 
-		// Animation runtime state for this shard (slot-indexed, <=127)
+		TRefCountPtr<FGIAG_TransformProviderState> SharedState;
+
 		FGIAG_AnimGraphUploadBuilder UploadBuilder;
 		bool bSentSkeletonStaticUpload = false;
 
-		/** Slot capacity for this shard (AnimationIndex range). Must match TransformProvider->AnimationSlotCount. runtime not change. */
-		int32 SlotCapacity = 0;
-		int32 SlotNum = 0;
-		TArray<int32> RecordIndexBySlot; // size == SlotCapacity
-		TBitArray<> SlotAlive;           // size == SlotCapacity
+		// ---- Computation data (bucket-level, indexed by SlotIndex) ----
+		int32 TotalSlotCapacity = 0;
+		bool bStorageInitialized = false;
+
+		TArray<int32> RecordIndexBySlot;
+		TBitArray<> SlotAlive;
 		TArray<int32> FreeSlots;
 
-		/** Per-slot TimeSlotIndex for per-instance time lookup. Size == SlotCapacity. Default 0 = WorldTime. */
 		TArray<uint8> TimeSlotIndexBySlot;
 
-		/** Per-slot master transform (follow instances do not participate). Size == SlotCapacity. */
 		TArray<FTransform> TransformBySlot;
-		/** Dirty bits for TransformBySlot. Size == SlotCapacity. */
 		TBitArray<> TransformDirty;
-		/** Unique dirty slot indices (deduped by TransformDirty). */
 		TArray<uint32> DirtyTransformSlots;
-		/** Newly allocated slots this tick (slot indices). Used to init previous=current for correct velocity on first frame. */
 		TArray<uint32> NewSlotsThisTick;
 
-		/** Per-node AoS storage: NodeStorageByNode[NodeIdx] is a byte array of size SlotCapacity*StrideBytes. */
-		TArray<TArray<uint8, TAlignedHeapAllocator<16>>> NodeStorageByNode; // size == NumNodes
-		TArray<uint8*> NodeBasePtrsByNode; // size == NumNodes (cached NodeStorageByNode[NodeIdx].GetData())
-		TArray<uint32> NodeStrideBytes; // size == NumNodes (copied from group at init)
+		TArray<TArray<uint8, TAlignedHeapAllocator<16>>> NodeStorageByNode;
+		TArray<uint8*> NodeBasePtrsByNode;
+		TArray<uint32> NodeStrideBytes;
 
-		// ---- Node param dirty tracker (GT only; event-driven uploads) ----
-		/** NodeIdx -> dirty bits by SlotIndex (size NumNodes, each bitarray size SlotCapacity). */
 		TArray<TBitArray<>> NodeParamDirtyBitsByNode;
-		/** NodeIdx -> unique dirty slot indices (deduped by NodeParamDirtyBitsByNode). */
 		TArray<TArray<uint32>> DirtyNodeParamSlotsByNode;
-		/** Dirty node mask + list (deduped). */
 		TBitArray<> DirtyNodeMask;
 		TArray<int32> DirtyNodeIndices;
 
-		/** Stable alive slot lists split by backend (maintained on Add/Remove/ModeSwitch). */
 		TArray<uint32> GpuAliveSlots;
 		TArray<uint32> CpuAliveSlots;
-		/** Slot -> index in alive list (INDEX_NONE if not present). */
 		TArray<int32> GpuAliveListIndexBySlot;
 		TArray<int32> CpuAliveListIndexBySlot;
-		/** Per-tick active slot lists (frustum-cull filtered from AliveSlots). */
 		TArray<uint32> GpuActiveInstanceIndices;
 
-		void InitStorage(const FGIAG_AnimGraphCompiledData& CompiledData, TConstArrayView<uint32> InNodeStrideBytes, int32 InSlotCapacity)
-		{
-			SlotCapacity = InSlotCapacity;
-			checkf(CompiledData.NumNodes > 0, TEXT("GIAG: invalid CompiledData.NumNodes."));
-			checkf(InNodeStrideBytes.Num() == CompiledData.NumNodes, TEXT("GIAG: NodeStrideBytes mismatch (Got=%d Expected=%d)."), InNodeStrideBytes.Num(), CompiledData.NumNodes);
+		int32 GetTotalSlotCapacity() const { return TotalSlotCapacity; }
 
-			RecordIndexBySlot.SetNum(SlotCapacity);
-			for (int32 i = 0; i < SlotCapacity; ++i) { RecordIndexBySlot[i] = INDEX_NONE; }
-			SlotAlive.SetNum(SlotCapacity, false);
-			FreeSlots.Reset();
-			SlotNum = 0;
-
-			TimeSlotIndexBySlot.SetNumZeroed(SlotCapacity);
-
-			TransformBySlot.SetNum(SlotCapacity);
-			for (int32 i = 0; i < SlotCapacity; ++i) { TransformBySlot[i] = FTransform::Identity; }
-			TransformDirty.SetNum(SlotCapacity, false);
-			DirtyTransformSlots.Reset();
-
-			// Allocate per-node AoS arrays (aligned) once per shard.
-			const int32 NumNodes = CompiledData.NumNodes;
-			NodeStorageByNode.SetNum(NumNodes);
-			NodeBasePtrsByNode.SetNum(NumNodes);
-			NodeStrideBytes.SetNum(NumNodes);
-			for (int32 NodeIdx = 0; NodeIdx < NumNodes; ++NodeIdx)
-			{
-				const uint32 Stride = InNodeStrideBytes[NodeIdx];
-				check(Stride > 0 && (Stride % 16u) == 0u);
-				NodeStrideBytes[NodeIdx] = Stride;
-				NodeStorageByNode[NodeIdx].SetNumZeroed((int64)SlotCapacity * (int64)Stride);
-				NodeBasePtrsByNode[NodeIdx] = NodeStorageByNode[NodeIdx].GetData();
-			}
-
-			// Node param dirty tracker (allocated once per shard).
-			NodeParamDirtyBitsByNode.SetNum(NumNodes);
-			DirtyNodeParamSlotsByNode.SetNum(NumNodes);
-			for (int32 NodeIdx = 0; NodeIdx < NumNodes; ++NodeIdx)
-			{
-				NodeParamDirtyBitsByNode[NodeIdx].SetNum(SlotCapacity, false);
-				DirtyNodeParamSlotsByNode[NodeIdx].Reset();
-			}
-			DirtyNodeMask.SetNum(NumNodes, false);
-			DirtyNodeIndices.Reset();
-
-			GpuAliveSlots.Reset();
-			CpuAliveSlots.Reset();
-			GpuAliveListIndexBySlot.SetNum(SlotCapacity);
-			CpuAliveListIndexBySlot.SetNum(SlotCapacity);
-			for (int32 i = 0; i < SlotCapacity; ++i)
-			{
-				GpuAliveListIndexBySlot[i] = INDEX_NONE;
-				CpuAliveListIndexBySlot[i] = INDEX_NONE;
-			}
-			GpuActiveInstanceIndices.Reset();
-		}
+		void InitBucketStorage(const FGIAG_AnimGraphCompiledData& CompiledData, TConstArrayView<uint32> InNodeStrideBytes);
+		void GrowCapacity(int32 NewShardCount, const FGIAG_AnimGraphCompiledData& CompiledData, TConstArrayView<uint32> InNodeStrideBytes);
+		int32 AllocateSlot();
+		void FreeSlot(int32 SlotIndex);
 
 		FORCEINLINE void MarkNodeParamDirty(int32 NodeIdx, int32 SlotIndex)
 		{
 			check(NodeIdx >= 0 && NodeIdx < NodeParamDirtyBitsByNode.Num());
-			check(SlotIndex >= 0 && SlotIndex < SlotCapacity);
+			check(SlotIndex >= 0 && SlotIndex < GetTotalSlotCapacity());
 
 			TBitArray<>& Bits = NodeParamDirtyBitsByNode[NodeIdx];
 			if (!Bits[SlotIndex])
@@ -646,19 +596,16 @@ private:
 		{
 			return NodeStorageByNode[NodeIdx].GetData() + (int64)NodeStrideBytes[NodeIdx] * (int64)SlotIndex;
 		}
-	};
 
-	struct FMeshBucket
-	{
-		USkeletalMesh* SkeletalMesh;
-		int32 GroupIndex = INDEX_NONE;
-		double BoundSphereRadius = 0.f;
+		static FORCEINLINE int32 ShardIndexOf(int32 SlotIndex)
+		{
+			return SlotIndex / GIAG::DefaultSlotsPerShard;
+		}
 
-		// Shards are index-stable within the bucket while any records reference them.
-		TSparseArray<FSkinnedShard> Shards;
-		
-		/** Number of live instances in this bucket (for cleanup). */
-		int32 NumInstances = 0;
+		static FORCEINLINE int32 ShardSlotOf(int32 SlotIndex)
+		{
+			return SlotIndex % GIAG::DefaultSlotsPerShard;
+		}
 	};
 	
 	float GetWorldTimeSeconds() const;
@@ -899,9 +846,8 @@ public:
 		TSubclassOf<AActor> CpuProxyClass;
 		FPrimitiveInstanceId InstanceId;
 		int32 BucketIndex = INDEX_NONE;
-		int32 ShardIndex = INDEX_NONE;
 		int32 GroupIndex = INDEX_NONE;
-		/** Stable animation slot index inside the graph-group. */
+		/** Bucket-wide slot index. Directly indexes FMeshBucket arrays. */
 		int32 SlotIndex = INDEX_NONE;
 
 		uint8 TimeSlotIndex = 0;

@@ -10,6 +10,10 @@
 
 uint NumWrites;
 
+uint DispatchGroupCountX;
+uint DispatchGroupCountY;
+uint DispatchGroupOffset;
+
 StructuredBuffer<uint> OutputIndices; // SlotIndex
 StructuredBuffer<FGIAG_Transform> ValuesComponentToWorld;
 StructuredBuffer<FGIAG_Transform> ValuesWorldToComponent;
@@ -20,7 +24,8 @@ RWStructuredBuffer<FGIAG_Transform> RW_WorldToComponentBySlot;
 [numthreads(64, 1, 1)]
 void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 {
-	const uint DispatchId = GroupId.x * 64u + GroupIndex;
+	uint GroupLinear = DispatchGroupOffset + GroupId.x + GroupId.y * DispatchGroupCountX + GroupId.z * (DispatchGroupCountX * DispatchGroupCountY);
+	const uint DispatchId = GroupLinear * 64u + GroupIndex;
 	if (DispatchId >= NumWrites)
 	{
 		return;

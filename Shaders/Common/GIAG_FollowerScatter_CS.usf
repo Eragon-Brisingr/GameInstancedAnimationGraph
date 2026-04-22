@@ -1,0 +1,83 @@
+// Follower Pass 2: scatter pre-computed skin matrices to follower TransformBuffer regions.
+// Each DstInfo carries SrcSlotBase to index into the unified SkinCache.
+// Grid: NumDsts x SlotsPerShard x NumBones (with tiling support)
+
+#include "/Engine/Public/Platform.ush"
+#include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
+
+uint NumBones;
+uint SlotsPerShard;
+uint NumDsts;
+
+uint DispatchGroupCountX;
+uint DispatchGroupCountY;
+uint DispatchGroupOffset;
+
+// Input: pre-computed skin cache from Pass 1 (3 float4 per bone per master slot)
+Buffer<float4> SkinCache;
+
+struct FFollowerDstInfo
+{
+	uint SrcSlotBase;
+	uint DstTransformOffsetBytes;
+};
+
+StructuredBuffer<FFollowerDstInfo> DstInfos;
+
+StructuredBuffer<uint> InitPrevBySlot;
+uint UseInitPrevBySlot;
+uint ForceInitPrevAllSlots;
+
+ByteAddressBuffer TransformBuffer;
+RWByteAddressBuffer RW_TransformBuffer;
+
+[numthreads(64, 1, 1)]
+void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	uint GroupLinear = DispatchGroupOffset + GroupId.x + GroupId.y * DispatchGroupCountX + GroupId.z * (DispatchGroupCountX * DispatchGroupCountY);
+	uint DispatchId = GroupLinear * 64u + GroupIndex;
+
+	uint Total = NumDsts * SlotsPerShard * NumBones;
+	if (DispatchId >= Total)
+	{
+		return;
+	}
+
+	uint DstIndex = DispatchId / (SlotsPerShard * NumBones);
+	uint Local = DispatchId - DstIndex * (SlotsPerShard * NumBones);
+	uint Slot = Local / NumBones;
+	uint DestBone = Local - Slot * NumBones;
+
+	FFollowerDstInfo DI = DstInfos[DstIndex];
+	uint DstTransformOffsetBytes = DI.DstTransformOffsetBytes;
+
+	// Read pre-computed skin matrix from unified SkinCache using master global slot
+	uint MasterSlot = DI.SrcSlotBase + Slot;
+	uint CacheBase = (MasterSlot * NumBones + DestBone) * 3u;
+	float4 R0 = SkinCache[CacheBase + 0u];
+	float4 R1 = SkinCache[CacheBase + 1u];
+	float4 R2 = SkinCache[CacheBase + 2u];
+	float3x4 SkinM = float3x4(R0, R1, R2);
+	float4x3 BoneXform = transpose(SkinM);
+
+	uint DestBase = (Slot * 2u) * NumBones + DestBone;
+	uint CurIndex = DestBase + 0u * NumBones;
+	uint PrevIndex = DestBase + 1u * NumBones;
+
+	bool bInitPrev =
+		(ForceInitPrevAllSlots != 0u) ||
+		((UseInitPrevBySlot != 0u) && (InitPrevBySlot[Slot] != 0u));
+
+	float4x3 PrevXf;
+	if (bInitPrev)
+	{
+		PrevXf = BoneXform;
+	}
+	else
+	{
+		PrevXf = LoadCompressedBoneTransform(TransformBuffer, DstTransformOffsetBytes, CurIndex);
+	}
+
+	StoreCompressedBoneTransform(RW_TransformBuffer, DstTransformOffsetBytes, PrevIndex, PrevXf);
+	StoreCompressedBoneTransform(RW_TransformBuffer, DstTransformOffsetBytes, CurIndex, BoneXform);
+}

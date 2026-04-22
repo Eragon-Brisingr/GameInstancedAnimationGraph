@@ -10,6 +10,12 @@ class UTextureRenderTarget2DArray;
 
 namespace GIAG
 {
+	/**
+	 * Mirrors `GIAG::DefaultSlotsPerShard` in `GIAG_AnimCommon.h` (shader module cannot include that header).
+	 * Distinct identifier so TUs that include both headers do not redefine `DefaultSlotsPerShard`.
+	 */
+	static constexpr uint32 AnimGraphShaderDefaultSlotsPerShard = 127;
+
 	struct FPoseToSkinPassParams
 	{
 		uint32 NumBones = 0;
@@ -35,12 +41,7 @@ namespace GIAG
 		uint32 NumBones = 0;
 		uint32 NumInstances = 0;
 
-		// IMPORTANT: Transform providers receive indirections in BYTES (see UE SkinningSceneExtension),
-		// and SkinningDataDecode uses `TransformBufferOffset * sizeof(FCompressedBoneTransform)` when building those indirections.
-		// We keep this value in BYTES here and pass it down to the shader as a byte base offset.
-		uint32 TransformOffset = 0; // base TransformBufferOffset (BYTES)
-
-		/** Optional ActiveIndex->SlotIndex mapping. */
+		/** ActiveIndex->SlotIndex mapping. */
 		FRDGBufferSRVRef ActiveInstanceIndices = nullptr; // StructuredBuffer<uint>
 
 		FRDGBufferSRVRef InverseRefPoseTRS = nullptr;  // StructuredBuffer<FGIAG_BoneTRS>
@@ -60,6 +61,11 @@ namespace GIAG
 		 * (i.e., do not shift from old current). This avoids first-frame velocity spikes for newly created slots.
 		 */
 		FRDGBufferSRVRef InitPrevBySlot = nullptr; // StructuredBuffer<uint>
+
+		/** Per-shard TransformBuffer byte offsets. Each shard writes to its own TransformBuffer region.
+		 *  SlotIndex % SlotsPerShard = ShardSlot, SlotIndex / SlotsPerShard = ShardIndex. */
+		FRDGBufferSRVRef ShardTransformOffsets = nullptr; // StructuredBuffer<uint>, size = NumShards (required)
+		uint32 SlotsPerShard = AnimGraphShaderDefaultSlotsPerShard;
 	};
 
 	GAMEINSTANCEDANIMATIONGRAPHSHADER_API void AddPoseToTransformBufferPasses(FRDGBuilder& GraphBuilder, const FPoseToTransformBufferPassParams& Params);
@@ -79,45 +85,31 @@ namespace GIAG
 	};
 	GAMEINSTANCEDANIMATIONGRAPHSHADER_API void AddPoseSpaceConvertPasses(FRDGBuilder& GraphBuilder, const FPoseSpaceConvertPassParams& Params);
 
-	struct FTransformBufferFollowPassParams
+	struct FFollowerDstInfo
 	{
-		/** Destination bone count. */
+		uint32 SrcSlotBase = 0;
+		uint32 DstTransformOffsetBytes = 0;
+	};
+
+	struct FFollowerPoseToTransformBufferPassParams
+	{
 		uint32 NumBones = 0;
-
-		/** Source bone count (master). */
 		uint32 SrcNumBones = 0;
-
-		/** Source TransformBuffer base offset (BYTES). 0xFFFFFFFF = invalid. */
-		uint32 SrcTransformOffsetBytes = 0xFFFFFFFFu;
-
-		/** SlotCount to copy (dstSlot==srcSlot). Must be <=127 and match AnimationSlotCount on the follower shard. */
-		uint32 SlotCount = 1;
-
-		/** Optional DestBoneIndex -> SrcBoneIndex remap (size NumBones). Null => identity mapping. */
-		FRDGBufferSRVRef BoneRemap = nullptr; // StructuredBuffer<uint>
-
-		/** Destination TransformBuffer offsets (BYTES) for all followers in this batch. */
-		FRDGBufferSRVRef DstTransformOffsetBytesByDst = nullptr; // StructuredBuffer<uint>
+		uint32 SlotsPerShard = AnimGraphShaderDefaultSlotsPerShard;
+		uint32 TotalSlotCapacity = 0; // master bucket total slots (FollowerCompute covers all)
 		uint32 NumDsts = 0;
 
-		/**
-		 * If non-zero, force previous=current for all slots this frame.
-		 * Useful when follower list/offsets change (dest old-current may be uninitialized).
-		 */
+		FRDGBufferSRVRef PoseTRS = nullptr;           // master PoseBuffer (ComponentPose)
+		FRDGBufferSRVRef InverseRefPoseTRS = nullptr;  // master InvRefPose
+		FRDGBufferSRVRef DstInfos = nullptr;           // StructuredBuffer<FFollowerDstInfo>
+		FRDGBufferSRVRef BoneRemap = nullptr;          // optional DestBone -> SrcBone
+		FRDGBufferSRVRef InitPrevBySlot = nullptr;
 		uint32 ForceInitPrevAllSlots = 0;
 
-		/**
-		 * Optional per-slot init flag (size SlotCount or SlotCapacity): if non-zero for a SlotIndex, we set previous=current
-		 * for this frame. This avoids first-frame velocity spikes for newly created slots.
-		 */
-		FRDGBufferSRVRef InitPrevBySlot = nullptr; // StructuredBuffer<uint>
-
-		/** UE SkinningSceneExtension TransformBuffer (ByteAddress). */
 		FRDGBufferRef TransformBuffer = nullptr;
 	};
 
-	/** Follower pass: copy/remap transforms from master TransformBuffer regions into this primitive's TransformBuffer region. */
-	GAMEINSTANCEDANIMATIONGRAPHSHADER_API void AddTransformBufferFollowPasses(FRDGBuilder& GraphBuilder, const FTransformBufferFollowPassParams& Params);
+	GAMEINSTANCEDANIMATIONGRAPHSHADER_API void AddFollowerPoseToTransformBufferPasses(FRDGBuilder& GraphBuilder, const FFollowerPoseToTransformBufferPassParams& Params);
 
 	struct FAttachToTransformBufferPassParams
 	{

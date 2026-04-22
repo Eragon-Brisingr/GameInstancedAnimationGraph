@@ -6,10 +6,13 @@
 
 uint NumBones;
 uint NumInstances;
-uint TransformOffset; // base TransformBufferOffset (BYTES) into BoneTransforms (see SkinningSceneExtension provider indirections)
 uint DispatchGroupCountX;
 uint DispatchGroupCountY;
 uint DispatchGroupOffset;
+
+// Per-shard TransformBuffer byte offsets. SlotIndex / SlotsPerShard = ShardIdx.
+StructuredBuffer<uint> ShardTransformOffsets;
+uint SlotsPerShard;
 
 StructuredBuffer<FGIAG_BoneTRS> InverseRefPoseTRS; // one per bone
 StructuredBuffer<FGIAG_BoneTRS> PoseTRS;      // slot-indexed, one per bone
@@ -63,12 +66,14 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 	FGIAG_BoneTRS SkinT = GIAG_MultiplyBoneTRS(InvRef, GlobalT); // Global ∘ InvRef
 	float3x4 SkinM = GIAG_MatrixFromBoneTRS(SkinT);
 
-	// TransformBuffer stores one transform per bone; 'SlotIndex' maps to SkinningDataOffset=SlotIndex*2 (current/previous).
-	// Provider indirections give TransformOffset in BYTES, while StoreCompressedBoneTransform takes a byte base + element index.
-	const uint Base = (SlotIndex * 2u) * NumBones + BoneIndex;
+	uint ShardIdx = SlotIndex / SlotsPerShard;
+	// Slot -> shard-local mapping.
+	uint LocalSlot = SlotIndex - ShardIdx * SlotsPerShard;
+	uint ResolvedTransformOffset = ShardTransformOffsets[ShardIdx];
+
+	const uint Base = (LocalSlot * 2u) * NumBones + BoneIndex;
 	const float4x3 BoneXform = transpose(SkinM);
 
-	// Shift previous: previous <- old current, then current <- new.
 	const uint CurIndex = Base + 0u * NumBones;
 	const uint PrevIndex = Base + 1u * NumBones;
 
@@ -92,8 +97,8 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 		PrevXf = transpose(PrevSkinM);
 	}
 
-	StoreCompressedBoneTransform(RW_TransformBuffer, TransformOffset, PrevIndex, PrevXf);
-	StoreCompressedBoneTransform(RW_TransformBuffer, TransformOffset, CurIndex, BoneXform);
+	StoreCompressedBoneTransform(RW_TransformBuffer, ResolvedTransformOffset, PrevIndex, PrevXf);
+	StoreCompressedBoneTransform(RW_TransformBuffer, ResolvedTransformOffset, CurIndex, BoneXform);
 
 	// Update prev-cache with this frame's current (store SkinM rows).
 	{
