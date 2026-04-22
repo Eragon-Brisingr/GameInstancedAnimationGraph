@@ -360,7 +360,7 @@ public:
 
 	// Extra padding added to the culling sphere radius (in cm).
 	UPROPERTY(EditAnywhere, Category="GameInstancedAnim|Culling")
-	float FrustumCullPadding = 0.0f;
+	float FrustumCullPadding = 100.0f;
 
 	// Minimum sphere radius used for culling when mesh bounds are tiny/unknown (in cm).
 	UPROPERTY(EditAnywhere, Category="GameInstancedAnim|Culling")
