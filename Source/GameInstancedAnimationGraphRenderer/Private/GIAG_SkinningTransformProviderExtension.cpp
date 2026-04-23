@@ -45,8 +45,6 @@ namespace
 		AddCopyBufferPass(GraphBuilder, Dst, DstOffsetBytes, Upload, 0, NumBytes);
 	}
 
-	// FGIAG_FollowerGroupKey / FGIAG_FollowerGroup are persistent members of the extension class
-	// (FGIAG_FollowerGroupKey_RT / FGIAG_FollowerGroup_RT in header).
 
 	static FRDGBufferRef CreateOrRegisterExternalBuffer(
 		FRDGBuilder& GraphBuilder,
@@ -577,22 +575,21 @@ void FGIAG_SkinningTransformProviderExtension::ProcessAttachOpsAndOutputs_RT(FRD
 	}
 }
 
-struct FGIAG_FollowerGroupKey_RT
+struct FFollowerGroupKey
 {
 	const FGIAG_TransformProviderState* MasterState = nullptr;
+	FName FollowMeshName;
+	bool operator==(const FFollowerGroupKey&) const = default;
+	friend uint32 GetTypeHash(const FFollowerGroupKey& K)
+	{
+		return HashCombine(::GetTypeHash((uintptr_t)K.MasterState), GetTypeHash(K.FollowMeshName));
+	}
+};
+struct FFollowerGroupData
+{
 	uint32 NumBones = 0;
 	uint32 SrcNumBones = 0;
 	const uint32* BoneRemap = nullptr;
-	bool operator==(const FGIAG_FollowerGroupKey_RT&) const = default;
-	friend uint32 GetTypeHash(const FGIAG_FollowerGroupKey_RT& Key)
-	{
-		return HashCombine(
-			HashCombine(::GetTypeHash((uintptr_t)Key.MasterState), ::GetTypeHash(Key.NumBones)),
-			HashCombine(::GetTypeHash(Key.SrcNumBones), ::GetTypeHash((uintptr_t)Key.BoneRemap)));
-	}
-};
-struct FGIAG_FollowerGroup_RT
-{
 	TArray<GIAG::FFollowerDstInfo> DstInfos;
 };
 
@@ -755,8 +752,6 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 		PendingAttachInstanceBuffersReadbacks_RT.RemoveAtSwap(i, EAllowShrinking::No);
 	}
 
-	RDG_EVENT_SCOPE(Context.GraphBuilder, "GIAG");
-
 	// Pass 1: group indirections by State (one group per bucket).
 	struct FMasterShardInfo
 	{
@@ -770,16 +765,7 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 	};
 	TMap<FGIAG_TransformProviderState*, FMasterGroup> MasterGroupsByState;
 
-	TMap<FGIAG_FollowerGroupKey_RT, FGIAG_FollowerGroup_RT> FollowerGroups_RT;
-
-	struct FMasterOutputs
-	{
-		FRDGBufferSRVRef FinalPoseSRV = nullptr;
-		FRDGBufferSRVRef InverseRefPoseSRV = nullptr;
-		uint32 SlotsPerShard = GIAG::DefaultSlotsPerShard;
-		uint32 TotalSlotCapacity = 0;
-	};
-	TMap<const FGIAG_TransformProviderState*, FMasterOutputs> MasterOutputsByState;
+	TMap<FFollowerGroupKey, FFollowerGroupData> FollowerGroups_RT;
 
 	for (const FSkinningTransformProvider::FProviderIndirection& Ind : Context.Indirections)
 	{
@@ -793,62 +779,62 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 		if (!bValid) continue;
 
 		checkf(ProviderData.Num() == FGIAG_ProviderData::NumWords(), TEXT("GIAG: ProviderData size mismatch."));
-		const FGIAG_ProviderData& D = *reinterpret_cast<const FGIAG_ProviderData*>(ProviderData.GetData());
-		checkf(D.SelfState != nullptr, TEXT("GIAG: ProviderData missing SelfState."));
+		const FGIAG_ProviderData& Data = *reinterpret_cast<const FGIAG_ProviderData*>(ProviderData.GetData());
+		checkf(Data.SelfState != nullptr, TEXT("GIAG: ProviderData missing SelfState."));
 
-		if (D.Mode == EGIAG_TransformProviderMode::FollowerCopyOrRemap)
+		if (Data.Mode == EGIAG_TransformProviderMode::FollowerCopyOrRemap)
 		{
-			checkf(D.NumBones > 0 && D.SrcNumBones > 0, TEXT("GIAG: invalid follower bone counts."));
-			checkf(D.MasterState != nullptr, TEXT("GIAG: follower provider missing MasterState."));
-			checkf(D.AnimationSlotCount > 0, TEXT("GIAG: invalid follower AnimationSlotCount=0."));
+			checkf(Data.NumBones > 0 && Data.SrcNumBones > 0, TEXT("GIAG: invalid follower bone counts."));
+			checkf(Data.MasterState != nullptr, TEXT("GIAG: follower provider missing MasterState."));
+			checkf(Data.AnimationSlotCount > 0, TEXT("GIAG: invalid follower AnimationSlotCount=0."));
 
-			FGIAG_FollowerGroupKey_RT Key;
-			Key.MasterState = D.MasterState;
-			Key.NumBones = D.NumBones;
-			Key.SrcNumBones = D.SrcNumBones;
-			Key.BoneRemap = D.BoneRemap;
-
-			const uint32 SrcSlotsPerShard = D.MasterState->SlotsPerShard;
-
-			GIAG::FFollowerDstInfo DstInfo;
-			DstInfo.SrcSlotBase = D.MasterShardIndex * SrcSlotsPerShard;
-			DstInfo.DstTransformOffsetBytes = Ind.TransformOffset;
-			FollowerGroups_RT.FindOrAdd(Key).DstInfos.Add(DstInfo);
+			FFollowerGroupData& Group = FollowerGroups_RT.FindOrAdd(FFollowerGroupKey{ Data.MasterState, Data.FollowMeshName });
+			Group.NumBones = Data.NumBones;
+			Group.SrcNumBones = Data.SrcNumBones;
+			Group.BoneRemap = Data.BoneRemap;
+			Group.DstInfos.Add({ Data.MasterShardIndex * Data.MasterState->SlotsPerShard, Ind.TransformOffset });
 			continue;
 		}
 
-		checkf(D.Mode == EGIAG_TransformProviderMode::MasterEvaluate, TEXT("GIAG: unexpected provider mode (%d)."), (int32)D.Mode);
-		FMasterGroup& MG = MasterGroupsByState.FindOrAdd(D.SelfState);
-		MG.State = D.SelfState;
-		FMasterShardInfo SI;
-		SI.ShardIndex = D.ShardIndex;
-		SI.TransformOffsetBytes = Ind.TransformOffset;
-		MG.Shards.Add(SI);
+		checkf(Data.Mode == EGIAG_TransformProviderMode::MasterEvaluate, TEXT("GIAG: unexpected provider mode (%d)."), (int32)Data.Mode);
+		FMasterGroup& MasterGroup = MasterGroupsByState.FindOrAdd(Data.SelfState);
+		MasterGroup.State = Data.SelfState;
+		FMasterShardInfo ShardInfo;
+		ShardInfo.ShardIndex = Data.ShardIndex;
+		ShardInfo.TransformOffsetBytes = Ind.TransformOffset;
+		MasterGroup.Shards.Add(ShardInfo);
 	}
 
-	// Pass 2: execute one computation per State (bucket). Build ShardTransformOffsets from shard info.
+	// Pass 2: drain payloads, process AnimLibrary uploads, compute animation once, dispatch followers.
 	for (auto& MasterKV : MasterGroupsByState)
 	{
 		FGIAG_TransformProviderState* State = MasterKV.Key;
-		FMasterGroup& MG = MasterKV.Value;
+		FMasterGroup& MasterGroup = MasterKV.Value;
+
+		// Phase A: drain all queued payloads; process AnimLibrary uploads from each; keep last for computation.
+		const FGIAG_AnimGraphCompiledData* LastCompiled = nullptr;
+		FGIAG_AnimGraphRunParams LastParams;
+		FGIAG_AnimGraphUploads LastUploads;
+		bool bHasPayload = false;
 
 		FGIAG_RenderPayload Payload;
 		while (State->DequeuePayload_RenderThread(Payload))
 		{
+			RDG_EVENT_SCOPE(Context.GraphBuilder, "GIAG Update Resource");
+
 			FGIAG_AnimGraphRunParams Params = MoveTemp(Payload.Params);
 			Params.OutputTransformBuffer = Context.TransformBuffer;
 
-			// Build per-shard TransformBuffer byte offsets for scatter write.
 			const int32 NumShards = Params.NumShards;
 			Params.ShardTransformOffsets.SetNumZeroed(NumShards);
-			for (const FMasterShardInfo& SI : MG.Shards)
+			for (const FMasterShardInfo& SI : MasterGroup.Shards)
 			{
 				if ((int32)SI.ShardIndex < NumShards)
 				{
 					Params.ShardTransformOffsets[SI.ShardIndex] = SI.TransformOffsetBytes;
 				}
 			}
-			// Ensure per-skeleton AnimLibrary buffers exist in this scene extension, then pass to runner.
+
 			FAnimLibraryRTCacheEntry& AnimLib = AnimLibraryBySkeleton_RT.FindOrAdd(FObjectKey(Params.Skeleton));
 			if (Params.AnimLibraryUpload.IsValid() && Params.AnimLibraryUpload->Version > AnimLib.Version)
 			{
@@ -1005,272 +991,261 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 				}
 			}
 
-			checkf(AnimLib.Version != 0
-				&& AnimLib.Buffers.ClipMetas.IsValid()
-				&& AnimLib.Buffers.AnimTRS.IsValid()
-				&& AnimLib.Buffers.RefPoseLocalTRS.IsValid()
-				&& AnimLib.Buffers.NumBones != 0,
-				TEXT("GIAG: AnimLibrary buffers not ready for Skeleton '%s'."), *GetNameSafe(Params.Skeleton));
-
-			RDG_EVENT_SCOPE(Context.GraphBuilder, "Master(%s,%s)", *Params.DebugGraphName, *Params.DebugMeshName);
-			const FGIAG_AnimGraphGpuRunner::FOutputs Outputs = State->GetRunnerRT()->AddPasses_RenderThread(
-				Context.GraphBuilder,
-				*Payload.Compiled,
-				Params,
-				MoveTemp(Payload.Uploads),
-				AnimLib.Buffers,
-				AnimResourceCache_RT);
-
-			// Save outputs for follower pass.
-			if (Outputs.FinalPoseBuffer != nullptr && Outputs.InverseRefPoseSRV != nullptr)
-			{
-				FMasterOutputs& MO = MasterOutputsByState.FindOrAdd(State);
-				MO.FinalPoseSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(Outputs.FinalPoseBuffer));
-				MO.InverseRefPoseSRV = Outputs.InverseRefPoseSRV;
-				MO.SlotsPerShard = (uint32)Params.SlotsPerShard;
-				MO.TotalSlotCapacity = (uint32)State->GetTotalCapacity();
-			}
-
-			// ---- Attach outputs: Niagara bucket writes FxTransform; native bucket writes instance buffers ----
-			if (Outputs.FinalPoseBuffer != nullptr && AttachGroupsByStateBucket_RT.Num() > 0)
-			{
-				const uint32 NumBonesU = (uint32)Params.NumBones;
-				checkf(
-					Outputs.FinalPoseType == EGIAG_AnimPinType::ComponentPose,
-					TEXT("GIAG: Attach expects FinalPose to be ComponentPose after compile-time convergence."));
-				FRDGBufferSRVRef PoseSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(Outputs.FinalPoseBuffer));
-
-				for (auto& KV : AttachGroupsByStateBucket_RT)
-				{
-					const FAttachGroupKey& Key = KV.Key;
-					FAttachGroupRT& AttachGroup = KV.Value;
-
-					if (Key.State != State)
-					{
-						continue;
-					}
-					if (AttachGroup.CPU.Num() == 0 || !AttachGroup.DescUploadBuffer.IsValid())
-					{
-						continue;
-					}
-
-					FAttachBucketRT* BucketPtr = AttachBuckets_RT.Find(Key.BucketId);
-					if (!BucketPtr || BucketPtr->NumInstances == 0)
-					{
-						continue;
-					}
-
-					FRDGBufferRef DescRDG = Context.GraphBuilder.RegisterExternalBuffer(AttachGroup.DescUploadBuffer, TEXT("GIAG_Attach_Desc_External"));
-					FRDGBufferSRVRef DescSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(DescRDG));
-
-					if (BucketPtr->IsNativeInstanceOnly())
-					{
-						// Native bucket: write instance buffers directly (no FxTransform).
-						if (!BucketPtr->InstanceOriginBuffer.IsValid() || !BucketPtr->InstanceTransformBuffer.IsValid())
-						{
-							continue;
-						}
-
-						FRDGBufferRef InstanceOriginRDG = Context.GraphBuilder.RegisterExternalBuffer(BucketPtr->InstanceOriginBuffer, TEXT("GIAG_Attach_InstanceOrigin_External"));
-						FRDGBufferRef InstanceTransformRDG = Context.GraphBuilder.RegisterExternalBuffer(BucketPtr->InstanceTransformBuffer, TEXT("GIAG_Attach_InstanceTransform_External"));
-
-						GIAG::FAttachToISMInstanceBuffersPassParams AttachParams;
-						AttachParams.NumBones = NumBonesU;
-						AttachParams.NumAttachments = (uint32)AttachGroup.CPU.Num();
-						AttachParams.PoseTRS = PoseSRV;
-						AttachParams.ComponentToWorldBySlot = Outputs.ComponentToWorldBySlotSRV;
-						AttachParams.AttachDescs = DescSRV;
-						AttachParams.RW_InstanceOrigin = Context.GraphBuilder.CreateUAV(InstanceOriginRDG, PF_A32B32G32R32F);
-						AttachParams.RW_InstanceTransform = Context.GraphBuilder.CreateUAV(InstanceTransformRDG, PF_A32B32G32R32F);
-						GIAG::AddAttachToISMInstanceBuffersPasses(Context.GraphBuilder, AttachParams);
-
-						Context.GraphBuilder.SetBufferAccessFinal(InstanceOriginRDG, ERHIAccess::SRVMask);
-						Context.GraphBuilder.SetBufferAccessFinal(InstanceTransformRDG, ERHIAccess::SRVMask);
-					}
-					else
-					{
-						// Niagara bucket: write FxTransform only.
-						if (!BucketPtr->FxTransformBuffer.IsValid())
-						{
-							continue;
-						}
-
-						FRDGBufferRef OutTRSRDG = Context.GraphBuilder.RegisterExternalBuffer(BucketPtr->FxTransformBuffer, TEXT("GIAG_Attach_FxTransform_External"));
-						FRDGBufferUAVRef OutTRSUAV = Context.GraphBuilder.CreateUAV(OutTRSRDG);
-
-						GIAG::FAttachToTransformBufferPassParams AttachParams;
-						AttachParams.NumBones = NumBonesU;
-						AttachParams.NumAttachments = (uint32)AttachGroup.CPU.Num();
-						AttachParams.PoseTRS = PoseSRV;
-						AttachParams.ComponentToWorldBySlot = Outputs.ComponentToWorldBySlotSRV;
-						AttachParams.AttachDescs = DescSRV;
-						AttachParams.RW_FxTransform = OutTRSUAV;
-						GIAG::AddAttachToTransformBufferPasses(Context.GraphBuilder, AttachParams);
-
-						// Ensure the external buffer ends the graph in SRV state for cross-system reads (e.g. Niagara).
-						Context.GraphBuilder.SetBufferAccessFinal(OutTRSRDG, ERHIAccess::SRVMask);
-					}
-				}
-			}
-
-			// Debug: request LocalPose slice readbacks (slot-indexed: SlotCapacity*NumBones FGIAG_BoneTRS).
-			if (Params.DebugLocalPoseReadbackRequests.Num() > 0 && Outputs.FinalPoseBuffer != nullptr)
-			{
-				FRDGBufferRef LocalReadbackSource = nullptr;
-
-				if (Outputs.FinalLocalPoseBuffer != nullptr)
-				{
-					LocalReadbackSource = Outputs.FinalLocalPoseBuffer;
-				}
-				else
-				{
-					checkf(
-						Outputs.FinalPoseType == EGIAG_AnimPinType::ComponentPose,
-						TEXT("GIAG: Debug LocalPose readback expects FinalPose to be ComponentPose after compile-time convergence."));
-					FRDGBufferRef ConvertedLocalPoseRDG = Context.GraphBuilder.CreateBuffer(
-						FRDGBufferDesc::CreateStructuredDesc(
-							sizeof(FGIAG_BoneTRS),
-							FMath::Max(1, Params.SlotCapacity * Params.NumBones)),
-						TEXT("GIAG_DebugFinalComponentToLocal"));
-					GIAG::FPoseSpaceConvertPassParams ConvertParams;
-					ConvertParams.NumBones = (uint32)Params.NumBones;
-					ConvertParams.NumInstances = (uint32)Params.NumInstances;
-					ConvertParams.SourcePoseType = 1u;
-					ConvertParams.DestinationPoseType = 0u;
-					ConvertParams.ActiveInstanceIndices = Outputs.ActiveInstanceIndicesSRV;
-					ConvertParams.ParentIndices = Outputs.ParentIndicesSRV;
-					ConvertParams.SourcePoseTRS = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(Outputs.FinalPoseBuffer));
-					ConvertParams.RW_DestinationPoseTRS = Context.GraphBuilder.CreateUAV(FRDGBufferUAVDesc(ConvertedLocalPoseRDG));
-					GIAG::AddPoseSpaceConvertPasses(Context.GraphBuilder, ConvertParams);
-					LocalReadbackSource = ConvertedLocalPoseRDG;
-				}
-
-				const uint32 NumBonesU = (uint32)Params.NumBones;
-				const uint32 NumTRS = NumBonesU;
-				const uint32 NumBytes = NumTRS * (uint32)sizeof(FGIAG_BoneTRS);
-
-				for (const FGIAG_LocalPoseReadbackRequest& Req : Params.DebugLocalPoseReadbackRequests)
-				{
-					FRDGBufferRef SliceRDG = Context.GraphBuilder.CreateBuffer(
-						FRDGBufferDesc::CreateStructuredDesc(sizeof(FGIAG_BoneTRS), FMath::Max(1u, NumTRS)),
-						TEXT("GIAG_DebugLocalPoseSlice"));
-
-					const uint64 SrcOffsetBytes = (uint64)Req.SlotIndex * (uint64)NumTRS * (uint64)sizeof(FGIAG_BoneTRS);
-					AddCopyBufferPass(Context.GraphBuilder, SliceRDG, 0, LocalReadbackSource, SrcOffsetBytes, (uint64)NumBytes);
-
-					TUniquePtr<FRHIGPUBufferReadback> Readback = MakeUnique<FRHIGPUBufferReadback>(TEXT("GIAG_DebugLocalPoseReadback"));
-					AddEnqueueCopyPass(Context.GraphBuilder, Readback.Get(), SliceRDG, NumBytes);
-
-					FPendingLocalPoseReadback Pending;
-					Pending.Readback = MoveTemp(Readback);
-					Pending.NumBytes = NumBytes;
-					Pending.NumBones = NumBonesU;
-					Pending.CpuRequestFrame = Params.DebugCpuRequestFrame;
-					Pending.RecordIndex = Req.RecordIndex;
-					Pending.SerialNumber = Req.SerialNumber;
-					PendingLocalPoseReadbacks_RT.Add(MoveTemp(Pending));
-				}
-			}
-
-			// Debug: request NeedNodeBits readbacks (NeedNodeBits is slot-indexed: SlotCapacity*WordsPerSlot uint32).
-			if (Params.DebugNeedNodeBitsReadbackRequests.Num() > 0 && Outputs.NeedNodeBitsBuffer != nullptr && Outputs.NeedNodeWordsPerSlot > 0)
-			{
-				const uint32 WordsPerSlot = Outputs.NeedNodeWordsPerSlot;
-				const uint32 NumBytes = WordsPerSlot * (uint32)sizeof(uint32);
-				const uint32 NumNodesU = Outputs.NeedNodeNumNodes;
-
-				for (const FGIAG_NeedNodeBitsReadbackRequest& Req : Params.DebugNeedNodeBitsReadbackRequests)
-				{
-					FRDGBufferRef SliceRDG = Context.GraphBuilder.CreateBuffer(
-						FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), FMath::Max(1u, WordsPerSlot)),
-						TEXT("GIAG_DebugNeedNodeBitsSlice"));
-
-					const uint64 SrcOffsetBytes = (uint64)Req.SlotIndex * (uint64)WordsPerSlot * (uint64)sizeof(uint32);
-					AddCopyBufferPass(Context.GraphBuilder, SliceRDG, 0, Outputs.NeedNodeBitsBuffer, SrcOffsetBytes, (uint64)NumBytes);
-
-					TUniquePtr<FRHIGPUBufferReadback> Readback = MakeUnique<FRHIGPUBufferReadback>(TEXT("GIAG_DebugNeedNodeBitsReadback"));
-					AddEnqueueCopyPass(Context.GraphBuilder, Readback.Get(), SliceRDG, NumBytes);
-
-					FPendingNeedNodeBitsReadback Pending;
-					Pending.Readback = MoveTemp(Readback);
-					Pending.NumBytes = NumBytes;
-					Pending.CpuRequestFrame = Params.DebugCpuRequestFrame;
-					Pending.RecordIndex = Req.RecordIndex;
-					Pending.SerialNumber = Req.SerialNumber;
-					Pending.SlotIndex = Req.SlotIndex;
-					Pending.NumNodes = NumNodesU;
-					Pending.WordsPerSlot = WordsPerSlot;
-					PendingNeedNodeBitsReadbacks_RT.Add(MoveTemp(Pending));
-				}
-			}
+			LastCompiled = Payload.Compiled;
+			LastParams = MoveTemp(Params);
+			LastUploads = MoveTemp(Payload.Uploads);
+			bHasPayload = true;
 		}
-	}
 
-	RDG_EVENT_SCOPE(Context.GraphBuilder, "Follower");
-
-	// Pass 3: execute one unified follower pass per (MasterState, NumBones, SrcNumBones, BoneRemap) group.
-	for (auto& KeyValue : FollowerGroups_RT)
-	{
-		const FGIAG_FollowerGroupKey_RT& Key = KeyValue.Key;
-		FGIAG_FollowerGroup_RT& Group = KeyValue.Value;
-		check(Group.DstInfos.Num() > 0);
-
-		const FMasterOutputs* MO = MasterOutputsByState.Find(Key.MasterState);
-		if (!MO || !MO->FinalPoseSRV || !MO->InverseRefPoseSRV)
+		if (!bHasPayload)
 		{
 			continue;
 		}
 
-		// Upload DstInfos structured buffer (per-destination SrcSlotBase + DstTransformOffsetBytes).
-		const uint32 NumDsts = (uint32)Group.DstInfos.Num();
-		FRDGBufferRef DstInfoRDG = CreateStructuredBuffer(
+		// Phase B: compute animation once + dispatch followers under a single Master scope.
+		FAnimLibraryRTCacheEntry& AnimLib = AnimLibraryBySkeleton_RT.FindOrAdd(FObjectKey(LastParams.Skeleton));
+		checkf(AnimLib.Version != 0
+			&& AnimLib.Buffers.ClipMetas.IsValid()
+			&& AnimLib.Buffers.AnimTRS.IsValid()
+			&& AnimLib.Buffers.RefPoseLocalTRS.IsValid()
+			&& AnimLib.Buffers.NumBones != 0,
+			TEXT("GIAG: AnimLibrary buffers not ready for Skeleton '%s'."), *GetNameSafe(LastParams.Skeleton));
+
+		RDG_EVENT_SCOPE(Context.GraphBuilder, "GIAG %s(%s)", *LastParams.DebugGraphName, *LastParams.DebugMeshName);
+		const FGIAG_AnimGraphGpuRunner::FOutputs Outputs = State->GetRunnerRT()->AddPasses_RenderThread(
 			Context.GraphBuilder,
-			TEXT("GIAG_FollowerDstInfos"),
-			sizeof(GIAG::FFollowerDstInfo),
-			NumDsts,
-			Group.DstInfos.GetData(),
-			(uint64)sizeof(GIAG::FFollowerDstInfo) * (uint64)NumDsts);
-		FRDGBufferSRVRef DstInfoSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(DstInfoRDG));
+			*LastCompiled,
+			LastParams,
+			MoveTemp(LastUploads),
+			AnimLib.Buffers,
+			AnimResourceCache_RT);
 
-		FRDGBufferSRVRef BoneRemapSRV = nullptr;
-		if (Key.BoneRemap != nullptr)
+		// ---- Attach outputs: Niagara bucket writes FxTransform; native bucket writes instance buffers ----
+		if (Outputs.FinalPoseBuffer != nullptr && AttachGroupsByStateBucket_RT.Num() > 0)
 		{
-			const FBoneRemapKey RemapKey{ Key.BoneRemap, Key.NumBones };
-			FBoneRemapRTCacheEntry& RemapEntry = BoneRemapBufferByKey_RT.FindOrAdd(RemapKey);
-			const uint32 RemapCount = FMath::Max<uint32>(1, Key.NumBones);
-			const FRDGBufferDesc Desc = FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), RemapCount);
-			const bool bNeedUpload = (!RemapEntry.Buffer.IsValid() || RemapEntry.Buffer->Desc != Desc);
+			const uint32 NumBonesU = (uint32)LastParams.NumBones;
+			checkf(
+				Outputs.FinalPoseType == EGIAG_AnimPinType::ComponentPose,
+				TEXT("GIAG: Attach expects FinalPose to be ComponentPose after compile-time convergence."));
+			FRDGBufferSRVRef PoseSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(Outputs.FinalPoseBuffer));
 
-			FRDGBufferRef BoneRemapRDG = CreateOrRegisterExternalBuffer(
-				Context.GraphBuilder,
-				RemapEntry.Buffer,
-				Desc,
-				TEXT("GIAG_Follow_BoneRemap_External"));
-			if (bNeedUpload && Key.NumBones > 0)
+			for (auto& KV : AttachGroupsByStateBucket_RT)
 			{
-				Context.GraphBuilder.QueueBufferUpload(
-					BoneRemapRDG,
-					Key.BoneRemap,
-					sizeof(uint32) * Key.NumBones,
-					ERDGInitialDataFlags::None);
+				const FAttachGroupKey& AttachKey = KV.Key;
+				FAttachGroupRT& AttachGroup = KV.Value;
+
+				if (AttachKey.State != State) { continue; }
+				if (AttachGroup.CPU.Num() == 0 || !AttachGroup.DescUploadBuffer.IsValid()) { continue; }
+
+				FAttachBucketRT* BucketPtr = AttachBuckets_RT.Find(AttachKey.BucketId);
+				if (!BucketPtr || BucketPtr->NumInstances == 0) { continue; }
+
+				FRDGBufferRef DescRDG = Context.GraphBuilder.RegisterExternalBuffer(AttachGroup.DescUploadBuffer, TEXT("GIAG_Attach_Desc_External"));
+				FRDGBufferSRVRef DescSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(DescRDG));
+
+				if (BucketPtr->IsNativeInstanceOnly())
+				{
+					if (!BucketPtr->InstanceOriginBuffer.IsValid() || !BucketPtr->InstanceTransformBuffer.IsValid()) { continue; }
+
+					FRDGBufferRef InstanceOriginRDG = Context.GraphBuilder.RegisterExternalBuffer(BucketPtr->InstanceOriginBuffer, TEXT("GIAG_Attach_InstanceOrigin_External"));
+					FRDGBufferRef InstanceTransformRDG = Context.GraphBuilder.RegisterExternalBuffer(BucketPtr->InstanceTransformBuffer, TEXT("GIAG_Attach_InstanceTransform_External"));
+
+					GIAG::FAttachToISMInstanceBuffersPassParams AttachParams;
+					AttachParams.NumBones = NumBonesU;
+					AttachParams.NumAttachments = (uint32)AttachGroup.CPU.Num();
+					AttachParams.PoseTRS = PoseSRV;
+					AttachParams.ComponentToWorldBySlot = Outputs.ComponentToWorldBySlotSRV;
+					AttachParams.AttachDescs = DescSRV;
+					AttachParams.RW_InstanceOrigin = Context.GraphBuilder.CreateUAV(InstanceOriginRDG, PF_A32B32G32R32F);
+					AttachParams.RW_InstanceTransform = Context.GraphBuilder.CreateUAV(InstanceTransformRDG, PF_A32B32G32R32F);
+					GIAG::AddAttachToISMInstanceBuffersPasses(Context.GraphBuilder, AttachParams);
+
+					Context.GraphBuilder.SetBufferAccessFinal(InstanceOriginRDG, ERHIAccess::SRVMask);
+					Context.GraphBuilder.SetBufferAccessFinal(InstanceTransformRDG, ERHIAccess::SRVMask);
+				}
+				else
+				{
+					if (!BucketPtr->FxTransformBuffer.IsValid()) { continue; }
+
+					FRDGBufferRef OutTRSRDG = Context.GraphBuilder.RegisterExternalBuffer(BucketPtr->FxTransformBuffer, TEXT("GIAG_Attach_FxTransform_External"));
+					FRDGBufferUAVRef OutTRSUAV = Context.GraphBuilder.CreateUAV(OutTRSRDG);
+
+					GIAG::FAttachToTransformBufferPassParams AttachParams;
+					AttachParams.NumBones = NumBonesU;
+					AttachParams.NumAttachments = (uint32)AttachGroup.CPU.Num();
+					AttachParams.PoseTRS = PoseSRV;
+					AttachParams.ComponentToWorldBySlot = Outputs.ComponentToWorldBySlotSRV;
+					AttachParams.AttachDescs = DescSRV;
+					AttachParams.RW_FxTransform = OutTRSUAV;
+					GIAG::AddAttachToTransformBufferPasses(Context.GraphBuilder, AttachParams);
+
+					Context.GraphBuilder.SetBufferAccessFinal(OutTRSRDG, ERHIAccess::SRVMask);
+				}
 			}
-			RemapEntry.Num = RemapCount;
-			BoneRemapSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(BoneRemapRDG, PF_R32_UINT));
 		}
 
-		GIAG::FFollowerPoseToTransformBufferPassParams FollowParams;
-		FollowParams.NumBones = Key.NumBones;
-		FollowParams.SrcNumBones = Key.SrcNumBones;
-		FollowParams.SlotsPerShard = MO->SlotsPerShard;
-		FollowParams.TotalSlotCapacity = MO->TotalSlotCapacity;
-		FollowParams.NumDsts = NumDsts;
-		FollowParams.PoseTRS = MO->FinalPoseSRV;
-		FollowParams.InverseRefPoseTRS = MO->InverseRefPoseSRV;
-		FollowParams.DstInfos = DstInfoSRV;
-		FollowParams.BoneRemap = BoneRemapSRV;
-		FollowParams.ForceInitPrevAllSlots = 1u;
-		FollowParams.TransformBuffer = Context.TransformBuffer;
-		GIAG::AddFollowerPoseToTransformBufferPasses(Context.GraphBuilder, FollowParams);
+		// Debug: request LocalPose slice readbacks.
+		if (LastParams.DebugLocalPoseReadbackRequests.Num() > 0 && Outputs.FinalPoseBuffer != nullptr)
+		{
+			FRDGBufferRef LocalReadbackSource = nullptr;
+			if (Outputs.FinalLocalPoseBuffer != nullptr)
+			{
+				LocalReadbackSource = Outputs.FinalLocalPoseBuffer;
+			}
+			else
+			{
+				checkf(Outputs.FinalPoseType == EGIAG_AnimPinType::ComponentPose,
+					TEXT("GIAG: Debug LocalPose readback expects FinalPose to be ComponentPose after compile-time convergence."));
+				FRDGBufferRef ConvertedLocalPoseRDG = Context.GraphBuilder.CreateBuffer(
+					FRDGBufferDesc::CreateStructuredDesc(sizeof(FGIAG_BoneTRS), FMath::Max(1, LastParams.SlotCapacity * LastParams.NumBones)),
+					TEXT("GIAG_DebugFinalComponentToLocal"));
+				GIAG::FPoseSpaceConvertPassParams ConvertParams;
+				ConvertParams.NumBones = (uint32)LastParams.NumBones;
+				ConvertParams.NumInstances = (uint32)LastParams.NumInstances;
+				ConvertParams.SourcePoseType = 1u;
+				ConvertParams.DestinationPoseType = 0u;
+				ConvertParams.ActiveInstanceIndices = Outputs.ActiveInstanceIndicesSRV;
+				ConvertParams.ParentIndices = Outputs.ParentIndicesSRV;
+				ConvertParams.SourcePoseTRS = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(Outputs.FinalPoseBuffer));
+				ConvertParams.RW_DestinationPoseTRS = Context.GraphBuilder.CreateUAV(FRDGBufferUAVDesc(ConvertedLocalPoseRDG));
+				GIAG::AddPoseSpaceConvertPasses(Context.GraphBuilder, ConvertParams);
+				LocalReadbackSource = ConvertedLocalPoseRDG;
+			}
+			const uint32 NumBonesU = (uint32)LastParams.NumBones;
+			const uint32 NumBytes = NumBonesU * (uint32)sizeof(FGIAG_BoneTRS);
+			for (const FGIAG_LocalPoseReadbackRequest& Req : LastParams.DebugLocalPoseReadbackRequests)
+			{
+				FRDGBufferRef SliceRDG = Context.GraphBuilder.CreateBuffer(
+					FRDGBufferDesc::CreateStructuredDesc(sizeof(FGIAG_BoneTRS), FMath::Max(1u, NumBonesU)), TEXT("GIAG_DebugLocalPoseSlice"));
+				AddCopyBufferPass(Context.GraphBuilder, SliceRDG, 0, LocalReadbackSource,
+					(uint64)Req.SlotIndex * (uint64)NumBonesU * (uint64)sizeof(FGIAG_BoneTRS), (uint64)NumBytes);
+				TUniquePtr<FRHIGPUBufferReadback> Readback = MakeUnique<FRHIGPUBufferReadback>(TEXT("GIAG_DebugLocalPoseReadback"));
+				AddEnqueueCopyPass(Context.GraphBuilder, Readback.Get(), SliceRDG, NumBytes);
+				FPendingLocalPoseReadback Pending;
+				Pending.Readback = MoveTemp(Readback);
+				Pending.NumBytes = NumBytes;
+				Pending.NumBones = NumBonesU;
+				Pending.CpuRequestFrame = LastParams.DebugCpuRequestFrame;
+				Pending.RecordIndex = Req.RecordIndex;
+				Pending.SerialNumber = Req.SerialNumber;
+				PendingLocalPoseReadbacks_RT.Add(MoveTemp(Pending));
+			}
+		}
+
+		// Debug: request NeedNodeBits readbacks.
+		if (LastParams.DebugNeedNodeBitsReadbackRequests.Num() > 0 && Outputs.NeedNodeBitsBuffer != nullptr && Outputs.NeedNodeWordsPerSlot > 0)
+		{
+			const uint32 WordsPerSlot = Outputs.NeedNodeWordsPerSlot;
+			const uint32 NumBytes = WordsPerSlot * (uint32)sizeof(uint32);
+			const uint32 NumNodesU = Outputs.NeedNodeNumNodes;
+			for (const FGIAG_NeedNodeBitsReadbackRequest& Req : LastParams.DebugNeedNodeBitsReadbackRequests)
+			{
+				FRDGBufferRef SliceRDG = Context.GraphBuilder.CreateBuffer(
+					FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), FMath::Max(1u, WordsPerSlot)), TEXT("GIAG_DebugNeedNodeBitsSlice"));
+				AddCopyBufferPass(Context.GraphBuilder, SliceRDG, 0, Outputs.NeedNodeBitsBuffer,
+					(uint64)Req.SlotIndex * (uint64)WordsPerSlot * (uint64)sizeof(uint32), (uint64)NumBytes);
+				TUniquePtr<FRHIGPUBufferReadback> Readback = MakeUnique<FRHIGPUBufferReadback>(TEXT("GIAG_DebugNeedNodeBitsReadback"));
+				AddEnqueueCopyPass(Context.GraphBuilder, Readback.Get(), SliceRDG, NumBytes);
+				FPendingNeedNodeBitsReadback Pending;
+				Pending.Readback = MoveTemp(Readback);
+				Pending.NumBytes = NumBytes;
+				Pending.CpuRequestFrame = LastParams.DebugCpuRequestFrame;
+				Pending.RecordIndex = Req.RecordIndex;
+				Pending.SerialNumber = Req.SerialNumber;
+				Pending.SlotIndex = Req.SlotIndex;
+				Pending.NumNodes = NumNodesU;
+				Pending.WordsPerSlot = WordsPerSlot;
+				PendingNeedNodeBitsReadbacks_RT.Add(MoveTemp(Pending));
+			}
+		}
+
+		// Dispatch followers for this MasterState (under the same Master RDG_EVENT_SCOPE).
+		if (Outputs.FinalPoseBuffer != nullptr && Outputs.InverseRefPoseSRV != nullptr)
+		{
+			FRDGBufferSRVRef FinalPoseSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(Outputs.FinalPoseBuffer));
+			const uint32 SlotsPerShard = (uint32)LastParams.SlotsPerShard;
+
+			FRDGBufferSRVRef IsActiveBySlotSRV;
+			{
+				const uint32 SC = FMath::Max(1u, (uint32)LastParams.SlotCapacity);
+				TArray<uint32> IsActive;
+				IsActive.SetNumZeroed(SC);
+				for (const uint32 SlotIdx : LastParams.ActiveInstanceIndices) { IsActive[SlotIdx] = 1u; }
+				FRDGBufferRef IsActiveRDG = CreateStructuredBuffer(
+					Context.GraphBuilder, TEXT("GIAG_FollowerIsActiveBySlot"),
+					sizeof(uint32), SC, IsActive.GetData(), (uint64)sizeof(uint32) * (uint64)SC);
+				IsActiveBySlotSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(IsActiveRDG));
+			}
+
+			for (auto& FollowKV : FollowerGroups_RT)
+			{
+				const FFollowerGroupKey& FollowKey = FollowKV.Key;
+				FFollowerGroupData& FollowGroup = FollowKV.Value;
+				if (FollowKey.MasterState != State) { continue; }
+				check(FollowGroup.DstInfos.Num() > 0);
+
+				const uint32 NumDsts = (uint32)FollowGroup.DstInfos.Num();
+				FRDGBufferRef DstInfoRDG = CreateStructuredBuffer(
+					Context.GraphBuilder, TEXT("GIAG_FollowerDstInfos"),
+					sizeof(GIAG::FFollowerDstInfo), NumDsts, FollowGroup.DstInfos.GetData(),
+					(uint64)sizeof(GIAG::FFollowerDstInfo) * (uint64)NumDsts);
+				FRDGBufferSRVRef DstInfoSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(DstInfoRDG));
+
+				FRDGBufferSRVRef BoneRemapSRV;
+				{
+					const FBoneRemapKey RemapKey{ FollowGroup.BoneRemap, FollowGroup.NumBones };
+					FBoneRemapRTCacheEntry& RemapEntry = BoneRemapBufferByKey_RT.FindOrAdd(RemapKey);
+					const uint32 RemapCount = FMath::Max<uint32>(1, FollowGroup.NumBones);
+					const FRDGBufferDesc Desc = FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), RemapCount);
+					const bool bNeedUpload = (!RemapEntry.Buffer.IsValid() || RemapEntry.Buffer->Desc != Desc);
+					FRDGBufferRef BoneRemapRDG = CreateOrRegisterExternalBuffer(
+						Context.GraphBuilder, RemapEntry.Buffer, Desc, TEXT("GIAG_Follow_BoneRemap_External"));
+					if (bNeedUpload && FollowGroup.NumBones > 0)
+					{
+						if (FollowGroup.BoneRemap != nullptr)
+						{
+							Context.GraphBuilder.QueueBufferUpload(BoneRemapRDG, FollowGroup.BoneRemap,
+								sizeof(uint32) * FollowGroup.NumBones, ERDGInitialDataFlags::None);
+						}
+						else
+						{
+							TArray<uint32> Identity;
+							Identity.SetNumUninitialized(FollowGroup.NumBones);
+							for (uint32 I = 0; I < FollowGroup.NumBones; ++I) { Identity[I] = I; }
+							Context.GraphBuilder.QueueBufferUpload(BoneRemapRDG, Identity.GetData(),
+								sizeof(uint32) * FollowGroup.NumBones, ERDGInitialDataFlags::NoCopy);
+						}
+					}
+					RemapEntry.Num = RemapCount;
+					BoneRemapSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(BoneRemapRDG, PF_R32_UINT));
+				}
+
+				FRDGBufferSRVRef InitPrevSRV;
+				{
+					FRDGBufferRef InitPrevRDG = Context.GraphBuilder.CreateBuffer(
+						FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), FMath::Max(1u, SlotsPerShard)),
+						TEXT("GIAG_FollowerInitPrevBySlotZero"));
+					AddClearUAVPass(Context.GraphBuilder, Context.GraphBuilder.CreateUAV(InitPrevRDG), 0u);
+					InitPrevSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(InitPrevRDG));
+				}
+
+				GIAG::FFollowerPoseToTransformBufferPassParams FollowParams;
+				FollowParams.NumBones = FollowGroup.NumBones;
+				FollowParams.SrcNumBones = FollowGroup.SrcNumBones;
+				FollowParams.SlotsPerShard = SlotsPerShard;
+				FollowParams.NumDsts = NumDsts;
+				FollowParams.PoseTRS = FinalPoseSRV;
+				FollowParams.InverseRefPoseTRS = Outputs.InverseRefPoseSRV;
+				FollowParams.DstInfos = DstInfoSRV;
+				FollowParams.BoneRemap = BoneRemapSRV;
+				FollowParams.InitPrevBySlot = InitPrevSRV;
+				FollowParams.ForceInitPrevAllSlots = 1u;
+				FollowParams.IsActiveBySlot = IsActiveBySlotSRV;
+				FollowParams.TransformBuffer = Context.TransformBuffer;
+				FollowParams.DebugName = FollowKey.FollowMeshName;
+				GIAG::AddFollowerPoseToTransformBufferPasses(Context.GraphBuilder, FollowParams);
+			}
+		}
 	}
 
 	// ---- Debug: attach FxTransform readback requests (GT -> RT -> GT) ----

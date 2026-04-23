@@ -56,11 +56,7 @@ namespace GIAG
 		/** If non-zero, force previous=current for all slots this frame (e.g. prev-cache newly created/resized). */
 		uint32 ForceInitPrevAllSlots = 0;
 
-		/**
-		 * Optional per-slot init flag (size SlotCapacity): if non-zero for a SlotIndex, we set previous=current for this frame
-		 * (i.e., do not shift from old current). This avoids first-frame velocity spikes for newly created slots.
-		 */
-		FRDGBufferSRVRef InitPrevBySlot = nullptr; // StructuredBuffer<uint>
+		FRDGBufferSRVRef InitPrevBySlot = nullptr; // StructuredBuffer<uint>, size = SlotCapacity
 
 		/** Per-shard TransformBuffer byte offsets. Each shard writes to its own TransformBuffer region.
 		 *  SlotIndex % SlotsPerShard = ShardSlot, SlotIndex / SlotsPerShard = ShardIndex. */
@@ -96,17 +92,19 @@ namespace GIAG
 		uint32 NumBones = 0;
 		uint32 SrcNumBones = 0;
 		uint32 SlotsPerShard = AnimGraphShaderDefaultSlotsPerShard;
-		uint32 TotalSlotCapacity = 0; // master bucket total slots (FollowerCompute covers all)
 		uint32 NumDsts = 0;
 
-		FRDGBufferSRVRef PoseTRS = nullptr;           // master PoseBuffer (ComponentPose)
-		FRDGBufferSRVRef InverseRefPoseTRS = nullptr;  // master InvRefPose
-		FRDGBufferSRVRef DstInfos = nullptr;           // StructuredBuffer<FFollowerDstInfo>
-		FRDGBufferSRVRef BoneRemap = nullptr;          // optional DestBone -> SrcBone
+		FRDGBufferSRVRef PoseTRS = nullptr;
+		FRDGBufferSRVRef InverseRefPoseTRS = nullptr;
+		FRDGBufferSRVRef DstInfos = nullptr;
+		FRDGBufferSRVRef BoneRemap = nullptr;          // DestBone -> SrcBone (identity when no remap)
 		FRDGBufferSRVRef InitPrevBySlot = nullptr;
 		uint32 ForceInitPrevAllSlots = 0;
+		FRDGBufferSRVRef IsActiveBySlot = nullptr;     // per-slot activity from master frustum cull
 
 		FRDGBufferRef TransformBuffer = nullptr;
+
+		FName DebugName;
 	};
 
 	GAMEINSTANCEDANIMATIONGRAPHSHADER_API void AddFollowerPoseToTransformBufferPasses(FRDGBuilder& GraphBuilder, const FFollowerPoseToTransformBufferPassParams& Params);

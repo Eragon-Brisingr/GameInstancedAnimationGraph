@@ -201,7 +201,7 @@ struct UGameInstancedAnimationGraphSubsystem::FPrivateUtils
 		NewShard.TransformProvider->AnimationSlotCount = SlotCapacity;
 		NewShard.TransformProvider->ShardIndex = (uint32)NewShardIndex;
 		NewShard.TransformProvider->SetState(InBucket.SharedState.GetReference());
-		NewShard.TransformProvider->ConfigureAsFollower(MasterState.GetReference(), DstNumBones, SrcBones, RemapShared, MasterShardIndex);
+		NewShard.TransformProvider->ConfigureAsFollower(MasterState.GetReference(), DstNumBones, SrcBones, RemapShared, MasterShardIndex, SkeletalMesh.GetFName());
 		NewShard.ISKMC->SetTransformProvider(NewShard.TransformProvider);
 		return NewShardIndex;
 	}

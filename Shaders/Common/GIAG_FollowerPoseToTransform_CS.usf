@@ -1,11 +1,12 @@
-// Follower Pass 2: scatter pre-computed skin matrices to follower TransformBuffer regions.
-// Each DstInfo carries SrcSlotBase to index into the unified SkinCache.
+// compute skin matrix from master PoseBuffer and write directly to TransformBuffer.
+// Eliminates the intermediate SkinCache buffer and the separate Compute+Scatter two-pass overhead.
 // Grid: NumDsts x SlotsPerShard x NumBones (with tiling support)
 
 #include "/Engine/Public/Platform.ush"
 #include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
 
-uint NumBones;
+uint NumBones;            // destination bone count
+uint SrcNumBones;         // source (master) bone count
 uint SlotsPerShard;
 uint NumDsts;
 
@@ -13,20 +14,22 @@ uint DispatchGroupCountX;
 uint DispatchGroupCountY;
 uint DispatchGroupOffset;
 
-// Input: pre-computed skin cache from Pass 1 (3 float4 per bone per master slot)
-Buffer<float4> SkinCache;
+StructuredBuffer<FGIAG_BoneTRS> PoseTRS;           // master unified PoseBuffer
+StructuredBuffer<FGIAG_BoneTRS> InverseRefPoseTRS;  // master InvRefPose
+
+StructuredBuffer<uint> BoneRemap; // size = NumBones (DestBone -> SrcBone)
 
 struct FFollowerDstInfo
 {
 	uint SrcSlotBase;
 	uint DstTransformOffsetBytes;
 };
-
 StructuredBuffer<FFollowerDstInfo> DstInfos;
 
 StructuredBuffer<uint> InitPrevBySlot;
-uint UseInitPrevBySlot;
 uint ForceInitPrevAllSlots;
+
+StructuredBuffer<uint> IsActiveBySlot;
 
 ByteAddressBuffer TransformBuffer;
 RWByteAddressBuffer RW_TransformBuffer;
@@ -48,17 +51,35 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 	uint Slot = Local / NumBones;
 	uint DestBone = Local - Slot * NumBones;
 
+	uint SrcBone = BoneRemap[DestBone];
+
 	FFollowerDstInfo DI = DstInfos[DstIndex];
+	uint MasterSlot = DI.SrcSlotBase + Slot;
 	uint DstTransformOffsetBytes = DI.DstTransformOffsetBytes;
 
-	// Read pre-computed skin matrix from unified SkinCache using master global slot
-	uint MasterSlot = DI.SrcSlotBase + Slot;
-	uint CacheBase = (MasterSlot * NumBones + DestBone) * 3u;
-	float4 R0 = SkinCache[CacheBase + 0u];
-	float4 R1 = SkinCache[CacheBase + 1u];
-	float4 R2 = SkinCache[CacheBase + 2u];
-	float3x4 SkinM = float3x4(R0, R1, R2);
-	float4x3 BoneXform = transpose(SkinM);
+	if (IsActiveBySlot[MasterSlot] == 0u)
+	{
+		return;
+	}
+
+	float4x3 BoneXform;
+	bool bValidSrc = (SrcBone != 0xFFFFFFFFu) && (SrcBone < SrcNumBones);
+	if (!bValidSrc)
+	{
+		BoneXform = float4x3(
+			1, 0, 0,
+			0, 1, 0,
+			0, 0, 1,
+			0, 0, 0);
+	}
+	else
+	{
+		FGIAG_BoneTRS GlobalT = PoseTRS[MasterSlot * SrcNumBones + SrcBone];
+		FGIAG_BoneTRS InvRef = InverseRefPoseTRS[SrcBone];
+		FGIAG_BoneTRS SkinT = GIAG_MultiplyBoneTRS(InvRef, GlobalT);
+		float3x4 SkinM = GIAG_MatrixFromBoneTRS(SkinT);
+		BoneXform = transpose(SkinM);
+	}
 
 	uint DestBase = (Slot * 2u) * NumBones + DestBone;
 	uint CurIndex = DestBase + 0u * NumBones;
@@ -66,7 +87,7 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 
 	bool bInitPrev =
 		(ForceInitPrevAllSlots != 0u) ||
-		((UseInitPrevBySlot != 0u) && (InitPrevBySlot[Slot] != 0u));
+		(InitPrevBySlot[Slot] != 0u);
 
 	float4x3 PrevXf;
 	if (bInitPrev)

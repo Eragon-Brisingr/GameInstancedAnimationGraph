@@ -62,7 +62,8 @@ public:
 		int32 InNumBones,
 		int32 InSrcNumBones,
 		TSharedPtr<const TArray<uint32>> InBoneRemapShared,
-		int32 InMasterShardIndex = 0);
+		int32 InMasterShardIndex,
+		FName InFollowMeshName);
 
 	EGIAG_TransformProviderMode GetMode() const { return Mode; }
 
@@ -84,5 +85,6 @@ private:
 	/** Optional remap storage to ensure RT lifetime; BoneRemapPtr points into this when set. */
 	TSharedPtr<const TArray<uint32>> BoneRemapShared;
 	const uint32* BoneRemapPtr = nullptr;
+	FName FollowMeshName;
 };
 

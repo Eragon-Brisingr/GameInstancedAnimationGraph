@@ -18,11 +18,7 @@ StructuredBuffer<FGIAG_BoneTRS> InverseRefPoseTRS; // one per bone
 StructuredBuffer<FGIAG_BoneTRS> PoseTRS;      // slot-indexed, one per bone
 StructuredBuffer<uint> ActiveInstanceIndices; // ActiveIndex -> SlotIndex
 
-// Optional per-slot init flag: if non-zero, set previous=current for this frame (avoid first-frame velocity spikes).
 StructuredBuffer<uint> InitPrevBySlot;
-uint UseInitPrevBySlot;
-
-// If non-zero, force previous=current for all slots this frame (e.g. prev-cache newly created/resized).
 uint ForceInitPrevAllSlots;
 
 // Source reads (same underlying buffer as RW_TransformBuffer).
@@ -79,7 +75,7 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 
 	const bool bInitPrev =
 		(ForceInitPrevAllSlots != 0u) ||
-		((UseInitPrevBySlot != 0u) && (InitPrevBySlot[SlotIndex] != 0u));
+		(InitPrevBySlot[SlotIndex] != 0u);
 
 	float4x3 PrevXf;
 	if (bInitPrev)

@@ -42,7 +42,8 @@ void UGIAG_TransformProviderData::ConfigureAsFollower(
 	int32 InNumBones,
 	int32 InSrcNumBones,
 	TSharedPtr<const TArray<uint32>> InBoneRemapShared,
-	int32 InMasterShardIndex)
+	int32 InMasterShardIndex,
+	FName InFollowMeshName)
 {
 	Mode = EGIAG_TransformProviderMode::FollowerCopyOrRemap;
 	MasterState = InMasterBridge;
@@ -51,6 +52,7 @@ void UGIAG_TransformProviderData::ConfigureAsFollower(
 	SrcNumBones = FMath::Max(0, InSrcNumBones);
 	BoneRemapShared = MoveTemp(InBoneRemapShared);
 	BoneRemapPtr = BoneRemapShared.IsValid() ? BoneRemapShared->GetData() : nullptr;
+	FollowMeshName = InFollowMeshName;
 }
 
 FTransformProviderRenderProxy* UGIAG_TransformProviderData::CreateRenderThreadResources(FSkinningSceneExtensionProxy* SceneProxy, FSceneInterface& Scene, FRHICommandListBase& RHICmdList)
@@ -65,6 +67,7 @@ FTransformProviderRenderProxy* UGIAG_TransformProviderData::CreateRenderThreadRe
 	ProviderData.BoneRemap = BoneRemapPtr;
 	ProviderData.ShardIndex = ShardIndex;
 	ProviderData.MasterShardIndex = (uint32)MasterShardIndex;
+	ProviderData.FollowMeshName = FollowMeshName;
 
 	// Render proxy must hold refs to keep State/MasterState alive on RT.
 	class FGIAG_TransformProviderRenderProxyWithRefs final : public FTransformProviderRenderProxy

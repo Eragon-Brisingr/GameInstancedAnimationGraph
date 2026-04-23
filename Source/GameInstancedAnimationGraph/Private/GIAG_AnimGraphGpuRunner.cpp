@@ -716,19 +716,28 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 			TBParams.PrevCacheFloat4 = PrevCacheRDG;
 			TBParams.ForceInitPrevAllSlots = bPrevCacheRecreated ? 1u : 0u;
 
-			// Optional: per-slot init flag buffer (size SlotCapacity). If set for a SlotIndex, we set previous=current for this frame.
-			if (Params.TransformUpload && Params.TransformUpload->InitPrevBySlot.Num() == Params.SlotCapacity)
 			{
-				const uint32 Num = (uint32)Params.TransformUpload->InitPrevBySlot.Num();
-				const uint64 NumBytes = (uint64)sizeof(uint32) * (uint64)Num;
-				FRDGBufferRef InitPrevRDG = CreateStructuredBuffer(
-					GraphBuilder,
-					TEXT("GIAG_InitPrevBySlot"),
-					sizeof(uint32),
-					Num,
-					Params.TransformUpload->InitPrevBySlot.GetData(),
-					NumBytes);
-				TBParams.InitPrevBySlot = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(InitPrevRDG, PF_R32_UINT));
+				const uint32 SC = (uint32)Params.SlotCapacity;
+				const bool bHasPerSlotData = Params.TransformUpload && Params.TransformUpload->InitPrevBySlot.Num() == Params.SlotCapacity;
+				if (bHasPerSlotData)
+				{
+					FRDGBufferRef InitPrevRDG = CreateStructuredBuffer(
+						GraphBuilder,
+						TEXT("GIAG_InitPrevBySlot"),
+						sizeof(uint32),
+						SC,
+						Params.TransformUpload->InitPrevBySlot.GetData(),
+						(uint64)sizeof(uint32) * (uint64)SC);
+					TBParams.InitPrevBySlot = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(InitPrevRDG, PF_R32_UINT));
+				}
+				else
+				{
+					FRDGBufferRef ZeroRDG = GraphBuilder.CreateBuffer(
+						FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), FMath::Max(1u, SC)),
+						TEXT("GIAG_InitPrevBySlotZero"));
+					AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ZeroRDG), 0u);
+					TBParams.InitPrevBySlot = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(ZeroRDG, PF_R32_UINT));
+				}
 			}
 
 			TBParams.SlotsPerShard = (uint32)Params.SlotsPerShard;

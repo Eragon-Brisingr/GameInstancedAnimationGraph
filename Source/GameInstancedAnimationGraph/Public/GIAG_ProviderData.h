@@ -51,6 +51,9 @@ struct alignas(8) FGIAG_ProviderData
 	/** Follower-only: master shard index within the master's bucket (for PoseBuffer SrcSlotBase). */
 	uint32 MasterShardIndex = 0;
 
+	/** Follower-only: mesh name for profiling / dispatch grouping. */
+	FName FollowMeshName;
+
 	static constexpr int32 NumWords()
 	{
 		return (int32)(sizeof(FGIAG_ProviderData) / sizeof(uint64));
