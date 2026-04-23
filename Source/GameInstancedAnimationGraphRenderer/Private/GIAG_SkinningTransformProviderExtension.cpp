@@ -820,7 +820,7 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 		FGIAG_RenderPayload Payload;
 		while (State->DequeuePayload_RenderThread(Payload))
 		{
-			RDG_EVENT_SCOPE(Context.GraphBuilder, "GIAG Update Resource");
+			RDG_EVENT_SCOPE(Context.GraphBuilder, "GIAG Upload Resource");
 
 			FGIAG_AnimGraphRunParams Params = MoveTemp(Payload.Params);
 			Params.OutputTransformBuffer = Context.TransformBuffer;

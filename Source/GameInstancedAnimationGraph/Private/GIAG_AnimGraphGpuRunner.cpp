@@ -159,15 +159,17 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 		TEXT("GIAG_AG_ComponentToWorldBySlot"));
 
 	{
-		RDG_EVENT_SCOPE(GraphBuilder, "Upload");
-
 		if (Uploads.bUploadSkeleton)
 		{
+			RDG_EVENT_SCOPE(GraphBuilder, "Upload Graph Resource");
+
 			CountUpload((uint64)sizeof(int32) * (uint64)Uploads.ParentIndices.Num());
 			CountUpload((uint64)sizeof(FGIAG_BoneTRS) * (uint64)Uploads.InverseRefPoseTRS.Num());
 			UploadStructuredBuffer(GraphBuilder, ParentRDG, 0, TEXT("GIAG_AG_UploadParent"), sizeof(int32), Uploads.ParentIndices.GetData(), Uploads.ParentIndices.Num());
 			UploadStructuredBuffer(GraphBuilder, InvRDG, 0, TEXT("GIAG_AG_UploadInvRef"), sizeof(FGIAG_BoneTRS), Uploads.InverseRefPoseTRS.GetData(), Uploads.InverseRefPoseTRS.Num());
 		}
+
+		RDG_EVENT_SCOPE(GraphBuilder, "Upload Instance Data");
 
 		// Per-slot transforms
 		if (Params.TransformUpload.IsValid() && Params.TransformUpload->DirtySlots.Num() > 0)
@@ -308,7 +310,7 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 
 	// Upload sparse node params by index (scatter packed bytes).
 	{
-		RDG_EVENT_SCOPE(GraphBuilder, "Upload");
+		RDG_EVENT_SCOPE(GraphBuilder, "Upload Node Paramaters");
 		for (const FGIAG_AnimGraphNodeUploadRun& Run : Uploads.NodeRuns)
 		{
 			checkf(Run.NodeIndex >= 0 && Run.NodeIndex < NodeParamRDGs.Num(), TEXT("GIAG: invalid NodeIndex=%d in upload run."), Run.NodeIndex);
@@ -379,25 +381,22 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 
 	if (bUploadActive)
 	{
+		Resources.ActiveInstanceIndicesNum = N;
+		Resources.ActiveInstanceIndicesCPU.SetNumUninitialized((int32)N);
+		if (N > 0)
 		{
-			RDG_EVENT_SCOPE(GraphBuilder, "Upload");
-			Resources.ActiveInstanceIndicesNum = N;
-			Resources.ActiveInstanceIndicesCPU.SetNumUninitialized((int32)N);
-			if (N > 0)
-			{
-				FMemory::Memcpy(Resources.ActiveInstanceIndicesCPU.GetData(), Params.ActiveInstanceIndices.GetData(), (SIZE_T)sizeof(uint32) * (SIZE_T)N);
-			}
-
-			CountUpload((uint64)sizeof(uint32) * (uint64)N);
-			UploadStructuredBuffer(
-				GraphBuilder,
-				ActiveRDG,
-				0,
-				TEXT("GIAG_AG_UploadActiveInstanceIndices"),
-				sizeof(uint32),
-				Resources.ActiveInstanceIndicesCPU.GetData(),
-				N);
+			FMemory::Memcpy(Resources.ActiveInstanceIndicesCPU.GetData(), Params.ActiveInstanceIndices.GetData(), (SIZE_T)sizeof(uint32) * (SIZE_T)N);
 		}
+
+		CountUpload((uint64)sizeof(uint32) * (uint64)N);
+		UploadStructuredBuffer(
+			GraphBuilder,
+			ActiveRDG,
+			0,
+			TEXT("GIAG_AG_UploadActiveInstanceIndices"),
+			sizeof(uint32),
+			Resources.ActiveInstanceIndicesCPU.GetData(),
+			N);
 	}
 
 	FRDGBufferSRVRef ActiveIndicesSRV = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(ActiveRDG));
@@ -420,25 +419,22 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 		}
 		if (bUploadTSI && SrcNum > 0)
 		{
-			{
-				RDG_EVENT_SCOPE(GraphBuilder, "Upload");
-				Resources.TimeSlotIndicesCPU.SetNumUninitialized(SrcNum);
-				FMemory::Memcpy(Resources.TimeSlotIndicesCPU.GetData(), Params.TimeSlotIndexBySlot.GetData(), (SIZE_T)SrcNum);
+			Resources.TimeSlotIndicesCPU.SetNumUninitialized(SrcNum);
+			FMemory::Memcpy(Resources.TimeSlotIndicesCPU.GetData(), Params.TimeSlotIndexBySlot.GetData(), (SIZE_T)SrcNum);
 
-				TArray<uint32, TInlineAllocator<128>> Expanded;
-				Expanded.SetNumUninitialized(SrcNum);
-				for (int32 i = 0; i < SrcNum; ++i) { Expanded[i] = (uint32)Resources.TimeSlotIndicesCPU[i]; }
+			TArray<uint32, TInlineAllocator<128>> Expanded;
+			Expanded.SetNumUninitialized(SrcNum);
+			for (int32 i = 0; i < SrcNum; ++i) { Expanded[i] = (uint32)Resources.TimeSlotIndicesCPU[i]; }
 
-				CountUpload((uint64)sizeof(uint32) * (uint64)SrcNum);
-				UploadStructuredBuffer(
-					GraphBuilder,
-					TimeSlotIdxRDG,
-					0,
-					TEXT("GIAG_AG_UploadTimeSlotIndices"),
-					sizeof(uint32),
-					Expanded.GetData(),
-					(uint32)SrcNum);
-			}
+			CountUpload((uint64)sizeof(uint32) * (uint64)SrcNum);
+			UploadStructuredBuffer(
+				GraphBuilder,
+				TimeSlotIdxRDG,
+				0,
+				TEXT("GIAG_AG_UploadTimeSlotIndices"),
+				sizeof(uint32),
+				Expanded.GetData(),
+				(uint32)SrcNum);
 		}
 	}
 
@@ -473,8 +469,6 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 	const bool bShouldRunGraphCull = bHasFinalNode && CompiledData.bEnableNodeCull && CompiledData.GraphCullShaderMap.IsValid();
 
 	{
-		RDG_EVENT_SCOPE(GraphBuilder, "GraphCull");
-
 		if (bShouldRunGraphCull)
 		{
 			// Build cull param SRVs in the exact declaration order for this permutation.
@@ -681,11 +675,7 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 			.OutputPosesPerNode = OutViews,
 			.InputBoneWeightsPerNode = TConstArrayView<TConstArrayView<FGIAG_RDGBoneWeights>>(),
 		};
-		{
-			const FString& NodeTypeName = NodeMeta->GetStruct()->GetName();
-			RDG_EVENT_SCOPE(GraphBuilder, "Node_%s", *NodeTypeName);
-			NodeMeta->AddPassesGPU(DispatchContext);
-		}
+		NodeMeta->AddPassesGPU(DispatchContext);
 	}
 
 	// Finalize:
