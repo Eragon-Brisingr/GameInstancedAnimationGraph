@@ -65,19 +65,19 @@ namespace
 		FRDGBufferSRVRef Alpha,
 		FRDGBufferUAVRef RW_OutPose)
 	{
-		FGIAG_PoseAdditiveCS::FParameters* BaseP = GraphBuilder.AllocParameters<FGIAG_PoseAdditiveCS::FParameters>();
-		BaseP->NumBones = NumBones;
-		BaseP->NumInstances = NumInstances;
-		BaseP->NodeIndex = NodeIndex;
-		BaseP->NeedNodeWordsPerSlot = NeedNodeWordsPerSlot;
-		BaseP->ActiveInstanceIndices = ActiveInstanceIndices;
-		BaseP->NeedNodeBits = NeedNodeBits;
-		BaseP->BasePose = BasePose;
-		BaseP->AdditivePose = AdditivePose;
-		BaseP->Alpha = Alpha;
-		BaseP->RW_OutPose = RW_OutPose;
+		FGIAG_PoseAdditiveCS::FParameters* BaseShaderParams = GraphBuilder.AllocParameters<FGIAG_PoseAdditiveCS::FParameters>();
+		BaseShaderParams->NumBones = NumBones;
+		BaseShaderParams->NumInstances = NumInstances;
+		BaseShaderParams->NodeIndex = NodeIndex;
+		BaseShaderParams->NeedNodeWordsPerSlot = NeedNodeWordsPerSlot;
+		BaseShaderParams->ActiveInstanceIndices = ActiveInstanceIndices;
+		BaseShaderParams->NeedNodeBits = NeedNodeBits;
+		BaseShaderParams->BasePose = BasePose;
+		BaseShaderParams->AdditivePose = AdditivePose;
+		BaseShaderParams->Alpha = Alpha;
+		BaseShaderParams->RW_OutPose = RW_OutPose;
 
-		TShaderMapRef<FGIAG_PoseAdditiveCS> CS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+		TShaderMapRef<FGIAG_PoseAdditiveCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
 		constexpr int32 ThreadsPerGroup = 64;
 		const int64 TotalWorkItems = (int64)NumBones * (int64)NumInstances;
@@ -86,19 +86,19 @@ namespace
 			ThreadsPerGroup,
 			[&](int32 /*ChunkGroups1D*/, int32 GroupOffset1D, const FIntVector& GroupCount)
 			{
-				FGIAG_PoseAdditiveCS::FParameters* P = GraphBuilder.AllocParameters<FGIAG_PoseAdditiveCS::FParameters>();
-				*P = *BaseP;
-				P->DispatchGroupCountX = (uint32)GroupCount.X;
-				P->DispatchGroupCountY = (uint32)GroupCount.Y;
-				P->DispatchGroupOffset = (uint32)GroupOffset1D;
+				FGIAG_PoseAdditiveCS::FParameters* ChunkShaderParams = GraphBuilder.AllocParameters<FGIAG_PoseAdditiveCS::FParameters>();
+				*ChunkShaderParams = *BaseShaderParams;
+				ChunkShaderParams->DispatchGroupCountX = (uint32)GroupCount.X;
+				ChunkShaderParams->DispatchGroupCountY = (uint32)GroupCount.Y;
+				ChunkShaderParams->DispatchGroupOffset = (uint32)GroupOffset1D;
 
 				GraphBuilder.AddPass(
 					RDG_EVENT_NAME("GIAG_Additive"),
-					P,
+					ChunkShaderParams,
 					ERDGPassFlags::Compute,
-					[P, CS, GroupCount](FRHIComputeCommandList& RHICmdList)
+					[ChunkShaderParams, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 					{
-						FComputeShaderUtils::Dispatch(RHICmdList, CS, *P, GroupCount);
+						FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *ChunkShaderParams, GroupCount);
 					});
 			});
 	}

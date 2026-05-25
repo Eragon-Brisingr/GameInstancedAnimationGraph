@@ -76,92 +76,101 @@ void FGIAG_GraphCullShaderMapPtr::Reset()
 
 namespace
 {
-	static bool NeedsGraphCullCookData(const FGIAG_AnimGraphCompiledData& C)
+	static bool NeedsGraphCullCookData(const FGIAG_AnimGraphCompiledData& CompiledData)
 	{
-		return C.bEnableNodeCull && C.FinalPoseOutput.NodeIndex >= 0;
+		return CompiledData.bEnableNodeCull && CompiledData.FinalPoseOutput.NodeIndex >= 0;
 	}
 
-	static uint64 HashGraphForCull(const FGIAG_AnimGraphCompiledData& C)
+	static uint64 HashGraphForCull(const FGIAG_AnimGraphCompiledData& CompiledData)
 	{
-		FSHA1 Sha;
-		auto UpdateU32 = [&Sha](uint32 V) { Sha.Update((const uint8*)&V, sizeof(V)); };
-		auto UpdateI32 = [&Sha](int32 V) { Sha.Update((const uint8*)&V, sizeof(V)); };
-		auto UpdateStr = [&Sha](const FString& S)
+		FSHA1 HashState;
+		auto UpdateU32 = [&HashState](uint32 Value)
 		{
-			FTCHARToUTF8 Utf8(*S);
-			Sha.Update((const uint8*)Utf8.Get(), (uint32)Utf8.Length());
+			HashState.Update((const uint8*)&Value, sizeof(Value));
+		};
+		auto UpdateI32 = [&HashState](int32 Value)
+		{
+			HashState.Update((const uint8*)&Value, sizeof(Value));
+		};
+		auto UpdateStr = [&HashState](const FString& String)
+		{
+			FTCHARToUTF8 Utf8(*String);
+			HashState.Update((const uint8*)Utf8.Get(), (uint32)Utf8.Length());
 		};
 
-		UpdateI32(C.NumNodes);
-		UpdateI32(C.NumPoseResources);
-		UpdateI32(C.ExecOrder.Num());
+		UpdateI32(CompiledData.NumNodes);
+		UpdateI32(CompiledData.NumPoseResources);
+		UpdateI32(CompiledData.ExecOrder.Num());
 
-		for (int32 NodeIdx : C.ExecOrder) { UpdateI32(NodeIdx); }
-
-		UpdateI32(C.FinalPoseOutput.NodeIndex);
-		UpdateI32(C.FinalPoseOutput.PinIndex);
-
-		for (int32 NodeIdx = 0; NodeIdx < C.NumNodes; ++NodeIdx)
+		for (int32 NodeIdx : CompiledData.ExecOrder)
 		{
-			const FGIAG_AnimCompiledNode& N = C.Nodes[NodeIdx];
-			UpdateStr(N.TypeId.ToString());
-			UpdateStr(N.MemberName.ToString());
-			UpdateI32(N.NumInputPins);
-			UpdateI32(N.NumOutputPins);
-			UpdateU32((N.NodeMeta != nullptr && N.NodeMeta->HasCullLogic()) ? 1u : 0u);
-			if (N.NodeMeta != nullptr && N.NodeMeta->HasCullLogic())
+			UpdateI32(NodeIdx);
+		}
+
+		UpdateI32(CompiledData.FinalPoseOutput.NodeIndex);
+		UpdateI32(CompiledData.FinalPoseOutput.PinIndex);
+
+		for (int32 NodeIdx = 0; NodeIdx < CompiledData.NumNodes; ++NodeIdx)
+		{
+			const FGIAG_AnimCompiledNode& Node = CompiledData.Nodes[NodeIdx];
+			UpdateStr(Node.TypeId.ToString());
+			UpdateStr(Node.MemberName.ToString());
+			UpdateI32(Node.NumInputPins);
+			UpdateI32(Node.NumOutputPins);
+			UpdateU32((Node.NodeMeta != nullptr && Node.NodeMeta->HasCullLogic()) ? 1u : 0u);
+			if (Node.NodeMeta != nullptr && Node.NodeMeta->HasCullLogic())
 			{
 				FString DummyBody;
 				const TCHAR* ElemType = nullptr;
 				const TCHAR* MemberName = nullptr;
-				N.NodeMeta->EmitCullNeedMaskHlslBody(DummyBody, ElemType, MemberName);
+				Node.NodeMeta->EmitCullNeedMaskHlslBody(DummyBody, ElemType, MemberName);
 				checkf(ElemType != nullptr && MemberName != nullptr,
 					TEXT("GIAG: node type '%s' cull HLSL did not provide element type/member name."),
-					*N.TypeId.ToString());
+					*Node.TypeId.ToString());
 				UpdateStr(FString(ElemType));
 				UpdateStr(FString(MemberName));
 			}
-			for (int32 Pin = 0; Pin < N.NumInputPins; ++Pin)
+			for (int32 Pin = 0; Pin < Node.NumInputPins; ++Pin)
 			{
-				const int32 SrcNode = N.InputSources.IsValidIndex(Pin) ? N.InputSources[Pin].NodeIndex : INDEX_NONE;
+				const int32 SrcNode = Node.InputSources.IsValidIndex(Pin) ? Node.InputSources[Pin].NodeIndex : INDEX_NONE;
 				UpdateI32(SrcNode);
 			}
 		}
 
-		Sha.Final();
+		HashState.Final();
 		uint8 HashBytes[20];
-		Sha.GetHash(HashBytes);
+		HashState.GetHash(HashBytes);
 		uint64 Out = 0;
 		FMemory::Memcpy(&Out, HashBytes, sizeof(uint64));
 		return Out;
 	}
 
-	static FString GenerateGraphCullShaderSource(const FGIAG_AnimGraphCompiledData& C)
+	static FString GenerateGraphCullShaderSource(const FGIAG_AnimGraphCompiledData& CompiledData)
 	{
-		checkf(C.NumNodes <= 256, TEXT("GIAG: GraphCull generator supports up to 256 nodes (NumNodes=%d)."), C.NumNodes);
+		checkf(CompiledData.NumNodes <= 256, TEXT("GIAG: GraphCull generator supports up to 256 nodes (NumNodes=%d)."), CompiledData.NumNodes);
 
 		FString Out;
 		Out.Reserve(32 * 1024);
 
 		auto SanitizeIdent = [](const FString& In) -> FString
 		{
-			FString R;
-			R.Reserve(In.Len() + 1);
+			FString Result;
+			Result.Reserve(In.Len() + 1);
 			for (int32 i = 0; i < In.Len(); ++i)
 			{
-				const TCHAR C = In[i];
+				const TCHAR Ch = In[i];
 				const bool bOk =
-					(C >= TEXT('A') && C <= TEXT('Z')) ||
-					(C >= TEXT('a') && C <= TEXT('z')) ||
-					(C >= TEXT('0') && C <= TEXT('9')) ||
-					(C == TEXT('_'));
-				R.AppendChar(bOk ? C : TEXT('_'));
+					(Ch >= TEXT('A') && Ch <= TEXT('Z')) ||
+					(Ch >= TEXT('a') && Ch <= TEXT('z')) ||
+					(Ch >= TEXT('0') && Ch <= TEXT('9')) ||
+					(Ch == TEXT('_'));
+				Result.AppendChar(bOk ? Ch : TEXT('_'));
 			}
-			if (R.IsEmpty() || !((R[0] >= TEXT('A') && R[0] <= TEXT('Z')) || (R[0] >= TEXT('a') && R[0] <= TEXT('z')) || R[0] == TEXT('_')))
+			if (Result.IsEmpty() || !((Result[0] >= TEXT('A') && Result[0] <= TEXT('Z')) || (Result[0] >= TEXT('a') && Result[0] <= TEXT('z')) || Result[0] == TEXT('_')))
 			{
-				R = TEXT("_") + R;
+				Result = TEXT("_") + Result;
 			}
-			return R;
+			return Result;
 		};
 
 		Out += TEXT("// Generated per-AnimGraph GraphCull include (no disk file).\n");
@@ -177,15 +186,18 @@ namespace
 		// - Generated code declares GIAG_CullParamN with the correct element type for that slot.
 		// - For node code ergonomics, we also #define the node symbol (e.g. LayerBlend_Alpha_Params) to GIAG_CullParamN.
 		TArray<int32, TInlineAllocator<256>> CullParamIndexByNode;
-		CullParamIndexByNode.SetNumUninitialized(C.NumNodes);
-		for (int32 i = 0; i < C.NumNodes; ++i) { CullParamIndexByNode[i] = INDEX_NONE; }
-		for (int32 i = 0; i < C.CullParamNodeIndices.Num(); ++i)
+		CullParamIndexByNode.SetNumUninitialized(CompiledData.NumNodes);
+		for (int32 i = 0; i < CompiledData.NumNodes; ++i)
 		{
-			const int32 NodeIdx = C.CullParamNodeIndices[i];
-			check(NodeIdx >= 0 && NodeIdx < C.NumNodes);
+			CullParamIndexByNode[i] = INDEX_NONE;
+		}
+		for (int32 i = 0; i < CompiledData.CullParamNodeIndices.Num(); ++i)
+		{
+			const int32 NodeIdx = CompiledData.CullParamNodeIndices[i];
+			check(NodeIdx >= 0 && NodeIdx < CompiledData.NumNodes);
 			CullParamIndexByNode[NodeIdx] = i;
 
-			const FGIAG_AnimCompiledNode& Node = C.Nodes[NodeIdx];
+			const FGIAG_AnimCompiledNode& Node = CompiledData.Nodes[NodeIdx];
 			check(Node.NodeMeta != nullptr);
 			FString DummyBody;
 			const TCHAR* ElemType = nullptr;
@@ -194,11 +206,11 @@ namespace
 			checkf(ElemType != nullptr,
 				TEXT("GIAG: node type '%s' cull HLSL did not provide element type."),
 				*Node.TypeId.ToString());
-			checkf(C.CullParamSymbols.IsValidIndex(i), TEXT("GIAG: CullParamSymbols size mismatch."));
+			checkf(CompiledData.CullParamSymbols.IsValidIndex(i), TEXT("GIAG: CullParamSymbols size mismatch."));
 			const uint32 RegisterIndex = (uint32)GIAG::GraphCullParamSRVRegisterBase + (uint32)i;
 			Out += FString::Printf(TEXT("StructuredBuffer<%s> %s : register(t%u);\n"),
 				ElemType,
-				*C.CullParamSymbols[i],
+				*CompiledData.CullParamSymbols[i],
 				RegisterIndex);
 		}
 		Out += TEXT("\n");
@@ -206,9 +218,9 @@ namespace
 		// Per-node-type cull functions (generated once per type).
 		{
 			TSet<FName> EmittedTypes;
-			for (int32 NodeIdx = 0; NodeIdx < C.NumNodes; ++NodeIdx)
+			for (int32 NodeIdx = 0; NodeIdx < CompiledData.NumNodes; ++NodeIdx)
 			{
-				const FGIAG_AnimCompiledNode& Node = C.Nodes[NodeIdx];
+				const FGIAG_AnimCompiledNode& Node = CompiledData.Nodes[NodeIdx];
 				const IGIAG_AnimNodeMeta* Meta = Node.NodeMeta;
 				if (!Meta || !Meta->HasCullLogic())
 				{
@@ -246,21 +258,21 @@ namespace
 
 		Out += TEXT("void GIAG_GraphCull_Propagate(uint SlotIndex, inout uint WordsLocal[GIAG_MAX_GRAPH_NODES / 32])\n{\n");
 
-		auto EmitSet = [&Out](int32 Src)
+		auto EmitSet = [&Out](int32 SrcNodeIdx)
 		{
-			const uint32 U = (uint32)Src;
-			Out += FString::Printf(TEXT("\t\tWordsLocal[%u] |= 0x%08Xu;\n"), (U >> 5), (1u << (U & 31u)));
+			const uint32 SrcU = (uint32)SrcNodeIdx;
+			Out += FString::Printf(TEXT("\t\tWordsLocal[%u] |= 0x%08Xu;\n"), (SrcU >> 5), (1u << (SrcU & 31u)));
 		};
 
-		for (int32 i = C.ExecOrder.Num() - 1; i >= 0; --i)
+		for (int32 i = CompiledData.ExecOrder.Num() - 1; i >= 0; --i)
 		{
-			const int32 NodeIdx = C.ExecOrder[i];
-			check(NodeIdx >= 0 && NodeIdx < C.NumNodes);
-			const uint32 U = (uint32)NodeIdx;
-			const uint32 Word = (U >> 5);
-			const uint32 Mask = (1u << (U & 31u));
+			const int32 NodeIdx = CompiledData.ExecOrder[i];
+			check(NodeIdx >= 0 && NodeIdx < CompiledData.NumNodes);
+			const uint32 NodeIdxU = (uint32)NodeIdx;
+			const uint32 Word = (NodeIdxU >> 5);
+			const uint32 Mask = (1u << (NodeIdxU & 31u));
 
-			const FGIAG_AnimCompiledNode& Node = C.Nodes[NodeIdx];
+			const FGIAG_AnimCompiledNode& Node = CompiledData.Nodes[NodeIdx];
 			const IGIAG_AnimNodeMeta* Meta = Node.NodeMeta;
 
 			Out += FString::Printf(TEXT("\tif ((WordsLocal[%u] & 0x%08Xu) != 0u)\n\t{\n"), Word, Mask);
@@ -275,9 +287,9 @@ namespace
 				if (CullParamIndexByNode.IsValidIndex(NodeIdx))
 				{
 					const int32 ParamIdx = CullParamIndexByNode[NodeIdx];
-					if (ParamIdx >= 0 && C.CullParamSymbols.IsValidIndex(ParamIdx))
+					if (ParamIdx >= 0 && CompiledData.CullParamSymbols.IsValidIndex(ParamIdx))
 					{
-						ParamSymbol = FStringView(C.CullParamSymbols[ParamIdx]);
+						ParamSymbol = FStringView(CompiledData.CullParamSymbols[ParamIdx]);
 					}
 				}
 				check(!ParamSymbol.IsEmpty());
@@ -306,7 +318,10 @@ namespace
 				for (int32 Pin = 0; Pin < Node.NumInputPins; ++Pin)
 				{
 					const int32 Src = Node.InputSources.IsValidIndex(Pin) ? Node.InputSources[Pin].NodeIndex : INDEX_NONE;
-					if (Src >= 0) { EmitSet(Src); }
+					if (Src >= 0)
+					{
+						EmitSet(Src);
+					}
 				}
 			}
 
@@ -402,40 +417,40 @@ const FGIAG_AnimGraphCompiledData& UGIAG_AnimGraph::Compile(bool bForce)
 	for (int32 i = 0; i < Compiled.NumNodes; ++i)
 	{
 		check(NodeMetas[i]);
-		FGIAG_AnimCompiledNode& N = Compiled.Nodes[i];
-		N.NodeMeta = NodeMetas[i];
-		UScriptStruct* S = NodeMetas[i]->GetStruct();
-		N.TypeId = S ? S->GetFName() : NAME_None;
+		FGIAG_AnimCompiledNode& Node = Compiled.Nodes[i];
+		Node.NodeMeta = NodeMetas[i];
+		UScriptStruct* NodeStruct = NodeMetas[i]->GetStruct();
+		Node.TypeId = NodeStruct ? NodeStruct->GetFName() : NAME_None;
 		checkf(NodeMemberNames.Num() == Compiled.NumNodes, TEXT("GIAG_AnimGraph: NodeMemberNames size mismatch."));
-		N.MemberName = NodeMemberNames[i];
+		Node.MemberName = NodeMemberNames[i];
 		if (NodeSettings.Num() > 0)
 		{
 			checkf(NodeSettings.Num() == Compiled.NumNodes, TEXT("GIAG_AnimGraph: NodeSettings size mismatch."));
-			N.Settings = NodeSettings[i];
+			Node.Settings = NodeSettings[i];
 		}
 		checkf(NodeInstanceOffsets.Num() == Compiled.NumNodes, TEXT("GIAG_AnimGraph: NodeInstanceOffsets size mismatch."));
-		N.InstanceDataOffset = NodeInstanceOffsets[i];
-		checkf(N.InstanceDataOffset >= 0, TEXT("GIAG_AnimGraph: Node %d has invalid InstanceDataOffset (bind via Builder.AddNode(node))."), i);
+		Node.InstanceDataOffset = NodeInstanceOffsets[i];
+		checkf(Node.InstanceDataOffset >= 0, TEXT("GIAG_AnimGraph: Node %d has invalid InstanceDataOffset (bind via Builder.AddNode(node))."), i);
 		// Cache GPU upload stride for this node (used for cull-param binding even when no slots are dirty).
 		{
 			uint32 Stride = 0;
-			const uint8* NodePtr = (const uint8*)Builder.DefaultInstance.GetMemory() + (int64)N.InstanceDataOffset;
+			const uint8* NodePtr = (const uint8*)Builder.DefaultInstance.GetMemory() + (int64)Node.InstanceDataOffset;
 			const void* Blob = NodeMetas[i]->GatherUploadsGPU(NodePtr, Stride);
-			N.GpuUploadStrideBytes = (Blob != nullptr) ? Stride : 0u;
+			Node.GpuUploadStrideBytes = (Blob != nullptr) ? Stride : 0u;
 		}
-		N.NumInputPins = NodeMetas[i]->GetNumInputPins();
-		N.NumOutputPins = NodeMetas[i]->GetNumOutputPins();
-		N.InputSources.SetNum(N.NumInputPins);
-		N.InputPoseResources.SetNumZeroed(N.NumInputPins);
-		N.OutputPoseResources.SetNumZeroed(N.NumOutputPins);
-		for (int32 p = 0; p < N.NumInputPins; ++p)
+		Node.NumInputPins = NodeMetas[i]->GetNumInputPins();
+		Node.NumOutputPins = NodeMetas[i]->GetNumOutputPins();
+		Node.InputSources.SetNum(Node.NumInputPins);
+		Node.InputPoseResources.SetNumZeroed(Node.NumInputPins);
+		Node.OutputPoseResources.SetNumZeroed(Node.NumOutputPins);
+		for (int32 PinIdx = 0; PinIdx < Node.NumInputPins; ++PinIdx)
 		{
-			N.InputSources[p] = { INDEX_NONE, INDEX_NONE };
-			N.InputPoseResources[p] = INDEX_NONE;
+			Node.InputSources[PinIdx] = { INDEX_NONE, INDEX_NONE };
+			Node.InputPoseResources[PinIdx] = INDEX_NONE;
 		}
-		for (int32 op = 0; op < N.NumOutputPins; ++op)
+		for (int32 OutPinIdx = 0; OutPinIdx < Node.NumOutputPins; ++OutPinIdx)
 		{
-			N.OutputPoseResources[op] = INDEX_NONE;
+			Node.OutputPoseResources[OutPinIdx] = INDEX_NONE;
 		}
 	}
 
@@ -464,15 +479,15 @@ const FGIAG_AnimGraphCompiledData& UGIAG_AnimGraph::Compile(bool bForce)
 	// Allocate pose resources for pose-typed output pins. (v1: unique resource per output pose pin)
 	Compiled.NumPoseResources = 0;
 	Compiled.PoseResourceTypes.Reset();
-	for (int32 n = 0; n < Compiled.NumNodes; ++n)
+	for (int32 NodeIdx = 0; NodeIdx < Compiled.NumNodes; ++NodeIdx)
 	{
-		FGIAG_AnimCompiledNode& Node = Compiled.Nodes[n];
-		for (int32 op = 0; op < Node.NumOutputPins; ++op)
+		FGIAG_AnimCompiledNode& Node = Compiled.Nodes[NodeIdx];
+		for (int32 OutPinIdx = 0; OutPinIdx < Node.NumOutputPins; ++OutPinIdx)
 		{
-			const EGIAG_AnimPinType OutType = Node.NodeMeta->GetOutputPinType(op);
+			const EGIAG_AnimPinType OutType = Node.NodeMeta->GetOutputPinType(OutPinIdx);
 			if (GIAG_IsPosePinType(OutType))
 			{
-				Node.OutputPoseResources[op] = Compiled.NumPoseResources++;
+				Node.OutputPoseResources[OutPinIdx] = Compiled.NumPoseResources++;
 				Compiled.PoseResourceTypes.Add(OutType);
 			}
 		}
@@ -588,15 +603,15 @@ const FGIAG_AnimGraphCompiledData& UGIAG_AnimGraph::Compile(bool bForce)
 	TArray<TArray<int32>> OutEdges;
 	OutEdges.SetNum(Compiled.NumNodes);
 
-	for (int32 dst = 0; dst < Compiled.NumNodes; ++dst)
+	for (int32 DstNodeIdx = 0; DstNodeIdx < Compiled.NumNodes; ++DstNodeIdx)
 	{
-		const FGIAG_AnimCompiledNode& Dst = Compiled.Nodes[dst];
-		for (int32 ip = 0; ip < Dst.NumInputPins; ++ip)
+		const FGIAG_AnimCompiledNode& DstNode = Compiled.Nodes[DstNodeIdx];
+		for (int32 InputPinIdx = 0; InputPinIdx < DstNode.NumInputPins; ++InputPinIdx)
 		{
-			const FGIAG_AnimOutputPinRef SrcPin = Dst.InputSources[ip];
+			const FGIAG_AnimOutputPinRef SrcPin = DstNode.InputSources[InputPinIdx];
 			if (SrcPin.NodeIndex >= 0)
 			{
-				OutEdges[SrcPin.NodeIndex].Add(dst);
+				OutEdges[SrcPin.NodeIndex].Add(DstNodeIdx);
 			}
 		}
 	}
@@ -711,15 +726,15 @@ const FGIAG_AnimGraphCompiledData& UGIAG_AnimGraph::Compile(bool bForce)
 	Compiled.ReverseDispatchSchedule.Reserve(Compiled.DispatchSchedule.Num());
 	for (int32 BatchIdx = Compiled.DispatchSchedule.Num() - 1; BatchIdx >= 0; --BatchIdx)
 	{
-		const FGIAG_AnimDispatchBatch& B = Compiled.DispatchSchedule[BatchIdx];
-		if (B.Kind != EGIAG_AnimDispatchBatchKind::Node || B.NodeIndices.Num() == 0)
+		const FGIAG_AnimDispatchBatch& Batch = Compiled.DispatchSchedule[BatchIdx];
+		if (Batch.Kind != EGIAG_AnimDispatchBatchKind::Node || Batch.NodeIndices.Num() == 0)
 		{
 			continue;
 		}
 		FGIAG_AnimDispatchBatch DispatchBatch;
 		DispatchBatch.Kind = EGIAG_AnimDispatchBatchKind::Node;
-		DispatchBatch.TypeId = B.TypeId;
-		DispatchBatch.NodeIndices = B.NodeIndices;
+		DispatchBatch.TypeId = Batch.TypeId;
+		DispatchBatch.NodeIndices = Batch.NodeIndices;
 		Algo::Reverse(DispatchBatch.NodeIndices); // reverse within the batch for reverse topo traversal
 		Compiled.ReverseDispatchSchedule.Add(MoveTemp(DispatchBatch));
 	}
@@ -734,7 +749,10 @@ const FGIAG_AnimGraphCompiledData& UGIAG_AnimGraph::Compile(bool bForce)
 	}
 
 	Compiled.CullIndexByNode.SetNumUninitialized(Compiled.NumNodes);
-	for (int32 i = 0; i < Compiled.CullIndexByNode.Num(); ++i) { Compiled.CullIndexByNode[i] = INDEX_NONE; }
+	for (int32 i = 0; i < Compiled.CullIndexByNode.Num(); ++i)
+	{
+		Compiled.CullIndexByNode[i] = INDEX_NONE;
+	}
 	Compiled.CullDispatchSchedule.Reset();
 	Compiled.NumCullNodes = 0;
 	Compiled.CullDispatchSchedule.Reserve(Compiled.DispatchSchedule.Num());
@@ -787,13 +805,13 @@ const FGIAG_AnimGraphCompiledData& UGIAG_AnimGraph::Compile(bool bForce)
 		Out.Reserve(In.Len() + 1);
 		for (int32 i = 0; i < In.Len(); ++i)
 		{
-			const TCHAR C = In[i];
+			const TCHAR Ch = In[i];
 			const bool bOk =
-				(C >= TEXT('A') && C <= TEXT('Z')) ||
-				(C >= TEXT('a') && C <= TEXT('z')) ||
-				(C >= TEXT('0') && C <= TEXT('9')) ||
-				(C == TEXT('_'));
-			Out.AppendChar(bOk ? C : TEXT('_'));
+				(Ch >= TEXT('A') && Ch <= TEXT('Z')) ||
+				(Ch >= TEXT('a') && Ch <= TEXT('z')) ||
+				(Ch >= TEXT('0') && Ch <= TEXT('9')) ||
+				(Ch == TEXT('_'));
+			Out.AppendChar(bOk ? Ch : TEXT('_'));
 		}
 		if (Out.IsEmpty() || !((Out[0] >= TEXT('A') && Out[0] <= TEXT('Z')) || (Out[0] >= TEXT('a') && Out[0] <= TEXT('z')) || Out[0] == TEXT('_')))
 		{
@@ -803,8 +821,8 @@ const FGIAG_AnimGraphCompiledData& UGIAG_AnimGraph::Compile(bool bForce)
 	};
 	for (int32 NodeIdx = 0; NodeIdx < Compiled.NumNodes; ++NodeIdx)
 	{
-		const FGIAG_AnimCompiledNode& N = Compiled.Nodes[NodeIdx];
-		const IGIAG_AnimNodeMeta* Meta = N.NodeMeta;
+		const FGIAG_AnimCompiledNode& Node = Compiled.Nodes[NodeIdx];
+		const IGIAG_AnimNodeMeta* Meta = Node.NodeMeta;
 		const bool bNeedsParams = Compiled.bEnableNodeCull && (Meta != nullptr) && Meta->HasCullLogic();
 		if (!bNeedsParams)
 		{
@@ -819,18 +837,18 @@ const FGIAG_AnimGraphCompiledData& UGIAG_AnimGraph::Compile(bool bForce)
 
 		FString DummyBody;
 		const TCHAR* ElemType = nullptr;
-		const TCHAR* MemberNameT = nullptr;
-		Meta->EmitCullNeedMaskHlslBody(DummyBody, ElemType, MemberNameT);
-		checkf(ElemType != nullptr && MemberNameT != nullptr,
+		const TCHAR* MemberName = nullptr;
+		Meta->EmitCullNeedMaskHlslBody(DummyBody, ElemType, MemberName);
+		checkf(ElemType != nullptr && MemberName != nullptr,
 			TEXT("GIAG: node type '%s' cull HLSL did not provide element type/member name."),
-			*N.TypeId.ToString());
+			*Node.TypeId.ToString());
 
-		const FString NodeName = SanitizeIdent(N.MemberName.ToString());
-		const FString Suffix = SanitizeIdent(FString(MemberNameT));
-		const FString Sym = FString::Printf(TEXT("%s_%s_Params"), *NodeName, *Suffix);
+		const FString NodeName = SanitizeIdent(Node.MemberName.ToString());
+		const FString Suffix = SanitizeIdent(FString(MemberName));
+		const FString Symbol = FString::Printf(TEXT("%s_%s_Params"), *NodeName, *Suffix);
 
 		Compiled.CullParamNodeIndices.Add(NodeIdx);
-		Compiled.CullParamSymbols.Add(Sym);
+		Compiled.CullParamSymbols.Add(Symbol);
 	}
 
 	// GraphCull shader specialization (Niagara-style): generate propagation code and cook/compile per platform.
@@ -867,11 +885,11 @@ const FGIAG_AnimGraphCompiledData& UGIAG_AnimGraph::Compile(bool bForce)
 	{
 		// Cooked runtime: shader map must have been serialized into the asset for current shader format.
 		const FName CurrentFormat = LegacyShaderPlatformToShaderFormat(GMaxRHIShaderPlatform);
-		for (const FCookedGraphCullShaderMapEntry& E : CookedGraphCullShaderMaps)
+		for (const FCookedGraphCullShaderMapEntry& Entry : CookedGraphCullShaderMaps)
 		{
-			if (E.ShaderFormat == CurrentFormat && E.ShaderMap.IsValid())
+			if (Entry.ShaderFormat == CurrentFormat && Entry.ShaderMap.IsValid())
 			{
-				Compiled.GraphCullShaderMap = E.ShaderMap;
+				Compiled.GraphCullShaderMap = Entry.ShaderMap;
 				break;
 			}
 		}

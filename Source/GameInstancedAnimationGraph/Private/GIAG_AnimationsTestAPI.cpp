@@ -43,19 +43,32 @@ bool FGIAG_AnimationsTestAPI::DebugGetMasterBucketStats(
 {
 	OutCapacity = 0;
 	OutNumInstances = 0;
-	if (!Subsystem || !SkeletalMesh || !AnimGraph) { return false; }
+	if (!Subsystem || !SkeletalMesh || !AnimGraph)
+	{
+		return false;
+	}
 
 	USkeleton* Skeleton = SkeletalMesh->GetSkeleton();
 	int32 GroupIndex = INDEX_NONE;
 	for (auto It = Subsystem->Groups.CreateConstIterator(); It; ++It)
 	{
-		if (It->AnimGraph == AnimGraph && It->Skeleton == Skeleton) { GroupIndex = It.GetIndex(); break; }
+		if (It->AnimGraph == AnimGraph && It->Skeleton == Skeleton)
+		{
+			GroupIndex = It.GetIndex();
+			break;
+		}
 	}
-	if (GroupIndex == INDEX_NONE) { return false; }
+	if (GroupIndex == INDEX_NONE)
+	{
+		return false;
+	}
 
 	const UGameInstancedAnimationGraphSubsystem::FBucketKey Key{ SkeletalMesh, GroupIndex, /*bFollower=*/false };
 	const int32* Found = Subsystem->BucketByKey.Find(Key);
-	if (!Found) { return false; }
+	if (!Found)
+	{
+		return false;
+	}
 
 	const auto& Bucket = Subsystem->Buckets[*Found];
 	OutCapacity = Bucket.GetTotalSlotCapacity();
@@ -72,19 +85,32 @@ bool FGIAG_AnimationsTestAPI::DebugGetFollowerBucketStats(
 {
 	OutCapacity = 0;
 	OutNumInstances = 0;
-	if (!Subsystem || !FollowSkeletalMesh || !AnimGraph) { return false; }
+	if (!Subsystem || !FollowSkeletalMesh || !AnimGraph)
+	{
+		return false;
+	}
 
 	USkeleton* Skeleton = FollowSkeletalMesh->GetSkeleton();
 	int32 GroupIndex = INDEX_NONE;
 	for (auto It = Subsystem->Groups.CreateConstIterator(); It; ++It)
 	{
-		if (It->AnimGraph == AnimGraph && It->Skeleton == Skeleton) { GroupIndex = It.GetIndex(); break; }
+		if (It->AnimGraph == AnimGraph && It->Skeleton == Skeleton)
+		{
+			GroupIndex = It.GetIndex();
+			break;
+		}
 	}
-	if (GroupIndex == INDEX_NONE) { return false; }
+	if (GroupIndex == INDEX_NONE)
+	{
+		return false;
+	}
 
 	const UGameInstancedAnimationGraphSubsystem::FBucketKey Key{ FollowSkeletalMesh, GroupIndex, /*bFollower=*/true };
 	const int32* Found = Subsystem->BucketByKey.Find(Key);
-	if (!Found) { return false; }
+	if (!Found)
+	{
+		return false;
+	}
 
 	const auto& Bucket = Subsystem->Buckets[*Found];
 	OutCapacity = Bucket.GetTotalSlotCapacity();

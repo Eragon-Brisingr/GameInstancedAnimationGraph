@@ -70,20 +70,20 @@ namespace
 		FRDGBufferSRVRef Alpha,
 		FRDGBufferUAVRef RW_OutPose)
 	{
-		FGIAG_PoseBlendLayerCS::FParameters* BaseP = GraphBuilder.AllocParameters<FGIAG_PoseBlendLayerCS::FParameters>();
-		BaseP->NumBones = NumBones;
-		BaseP->NumInstances = NumInstances;
-		BaseP->NodeIndex = NodeIndex;
-		BaseP->NeedNodeWordsPerSlot = NeedNodeWordsPerSlot;
-		BaseP->ActiveInstanceIndices = ActiveInstanceIndices;
-		BaseP->NeedNodeBits = NeedNodeBits;
-		BaseP->PoseA = PoseA;
-		BaseP->PoseB = PoseB;
-		BaseP->Weights = Weights;
-		BaseP->Alpha = Alpha;
-		BaseP->RW_OutPose = RW_OutPose;
+		FGIAG_PoseBlendLayerCS::FParameters* BaseShaderParams = GraphBuilder.AllocParameters<FGIAG_PoseBlendLayerCS::FParameters>();
+		BaseShaderParams->NumBones = NumBones;
+		BaseShaderParams->NumInstances = NumInstances;
+		BaseShaderParams->NodeIndex = NodeIndex;
+		BaseShaderParams->NeedNodeWordsPerSlot = NeedNodeWordsPerSlot;
+		BaseShaderParams->ActiveInstanceIndices = ActiveInstanceIndices;
+		BaseShaderParams->NeedNodeBits = NeedNodeBits;
+		BaseShaderParams->PoseA = PoseA;
+		BaseShaderParams->PoseB = PoseB;
+		BaseShaderParams->Weights = Weights;
+		BaseShaderParams->Alpha = Alpha;
+		BaseShaderParams->RW_OutPose = RW_OutPose;
 
-		TShaderMapRef<FGIAG_PoseBlendLayerCS> CS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+		TShaderMapRef<FGIAG_PoseBlendLayerCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
 		constexpr int32 ThreadsPerGroup = 64;
 		const int64 TotalWorkItems = (int64)NumBones * (int64)NumInstances;
@@ -92,19 +92,19 @@ namespace
 			ThreadsPerGroup,
 			[&](int32 /*ChunkGroups1D*/, int32 GroupOffset1D, const FIntVector& GroupCount)
 			{
-				FGIAG_PoseBlendLayerCS::FParameters* P = GraphBuilder.AllocParameters<FGIAG_PoseBlendLayerCS::FParameters>();
-				*P = *BaseP;
-				P->DispatchGroupCountX = (uint32)GroupCount.X;
-				P->DispatchGroupCountY = (uint32)GroupCount.Y;
-				P->DispatchGroupOffset = (uint32)GroupOffset1D;
+				FGIAG_PoseBlendLayerCS::FParameters* ChunkShaderParams = GraphBuilder.AllocParameters<FGIAG_PoseBlendLayerCS::FParameters>();
+				*ChunkShaderParams = *BaseShaderParams;
+				ChunkShaderParams->DispatchGroupCountX = (uint32)GroupCount.X;
+				ChunkShaderParams->DispatchGroupCountY = (uint32)GroupCount.Y;
+				ChunkShaderParams->DispatchGroupOffset = (uint32)GroupOffset1D;
 
 				GraphBuilder.AddPass(
 					RDG_EVENT_NAME("GIAG_LayerBlend"),
-					P,
+					ChunkShaderParams,
 					ERDGPassFlags::Compute,
-					[P, CS, GroupCount](FRHIComputeCommandList& RHICmdList)
+					[ChunkShaderParams, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 					{
-						FComputeShaderUtils::Dispatch(RHICmdList, CS, *P, GroupCount);
+						FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *ChunkShaderParams, GroupCount);
 					});
 			});
 	}
@@ -136,8 +136,8 @@ void FGIAG_LayerBlendNode::EnumerateResourceRequests(FConstStructView Settings, 
 		return;
 	}
 
-	const FGIAG_BlendLayerSettings* S = Settings.GetPtr<const FGIAG_BlendLayerSettings>();
-	UHierarchyTable* Table = S ? S->BlendMaskTable.Get() : nullptr;
+	const FGIAG_BlendLayerSettings* BlendSettings = Settings.GetPtr<const FGIAG_BlendLayerSettings>();
+	UHierarchyTable* Table = BlendSettings ? BlendSettings->BlendMaskTable.Get() : nullptr;
 
 	FGIAG_AnimResourceRequest Req;
 	Req.Slot = 0; // Slot 0 reserved for BlendLayer mask weights

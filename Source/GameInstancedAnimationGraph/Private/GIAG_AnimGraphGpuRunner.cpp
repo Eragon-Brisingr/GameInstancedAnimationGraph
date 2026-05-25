@@ -369,7 +369,7 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 	Outputs.InverseRefPoseSRV = InvSRV;
 
 	// ActiveInstanceIndices is always-on (ActiveIndex -> SlotIndex).
-	const uint32 N = (uint32)Params.ActiveInstanceIndices.Num();
+	const uint32 NumActive = (uint32)Params.ActiveInstanceIndices.Num();
 	const uint32 ActiveCapacity = FMath::Max<uint32>(1u, (uint32)Params.SlotCapacity);
 	FRDGBufferRef ActiveRDG = CreateOrRegisterExternalBuffer(
 		GraphBuilder,
@@ -378,25 +378,25 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 		TEXT("GIAG_AG_ActiveInstanceIndices"));
 
 	bool bUploadActive = false;
-	if (Resources.ActiveInstanceIndicesNum != N || (uint32)Resources.ActiveInstanceIndicesCPU.Num() != N)
+	if (Resources.ActiveInstanceIndicesNum != NumActive || (uint32)Resources.ActiveInstanceIndicesCPU.Num() != NumActive)
 	{
 		bUploadActive = true;
 	}
-	else if (N > 0)
+	else if (NumActive > 0)
 	{
-		bUploadActive = FMemory::Memcmp(Resources.ActiveInstanceIndicesCPU.GetData(), Params.ActiveInstanceIndices.GetData(), (SIZE_T)sizeof(uint32) * (SIZE_T)N) != 0;
+		bUploadActive = FMemory::Memcmp(Resources.ActiveInstanceIndicesCPU.GetData(), Params.ActiveInstanceIndices.GetData(), (SIZE_T)sizeof(uint32) * (SIZE_T)NumActive) != 0;
 	}
 
 	if (bUploadActive)
 	{
-		Resources.ActiveInstanceIndicesNum = N;
-		Resources.ActiveInstanceIndicesCPU.SetNumUninitialized((int32)N);
-		if (N > 0)
+		Resources.ActiveInstanceIndicesNum = NumActive;
+		Resources.ActiveInstanceIndicesCPU.SetNumUninitialized((int32)NumActive);
+		if (NumActive > 0)
 		{
-			FMemory::Memcpy(Resources.ActiveInstanceIndicesCPU.GetData(), Params.ActiveInstanceIndices.GetData(), (SIZE_T)sizeof(uint32) * (SIZE_T)N);
+			FMemory::Memcpy(Resources.ActiveInstanceIndicesCPU.GetData(), Params.ActiveInstanceIndices.GetData(), (SIZE_T)sizeof(uint32) * (SIZE_T)NumActive);
 		}
 
-		CountUpload((uint64)sizeof(uint32) * (uint64)N);
+		CountUpload((uint64)sizeof(uint32) * (uint64)NumActive);
 		UploadStructuredBuffer(
 			GraphBuilder,
 			ActiveRDG,
@@ -404,7 +404,7 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 			TEXT("GIAG_AG_UploadActiveInstanceIndices"),
 			sizeof(uint32),
 			Resources.ActiveInstanceIndicesCPU.GetData(),
-			N);
+			NumActive);
 	}
 
 	FRDGBufferSRVRef ActiveIndicesSRV = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(ActiveRDG));
@@ -432,7 +432,10 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 
 			TArray<uint32, TInlineAllocator<128>> Expanded;
 			Expanded.SetNumUninitialized(SrcNum);
-			for (int32 i = 0; i < SrcNum; ++i) { Expanded[i] = (uint32)Resources.TimeSlotIndicesCPU[i]; }
+			for (int32 i = 0; i < SrcNum; ++i)
+			{
+				Expanded[i] = (uint32)Resources.TimeSlotIndicesCPU[i];
+			}
 
 			CountUpload((uint64)sizeof(uint32) * (uint64)SrcNum);
 			UploadStructuredBuffer(

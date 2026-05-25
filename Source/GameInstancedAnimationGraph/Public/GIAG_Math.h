@@ -4,8 +4,8 @@
 
 namespace GIAG
 {
-	FORCEINLINE float Clamp01(float V)
+	FORCEINLINE float Clamp01(float Value)
 	{
-		return FMath::Clamp(V, 0.0f, 1.0f);
+		return FMath::Clamp(Value, 0.0f, 1.0f);
 	}
 }

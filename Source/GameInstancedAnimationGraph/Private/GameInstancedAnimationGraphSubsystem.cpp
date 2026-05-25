@@ -231,16 +231,25 @@ void UGameInstancedAnimationGraphSubsystem::FMeshBucket::InitBucketStorage(
 	check(TotalCap > 0);
 
 	RecordIndexBySlot.SetNum(TotalCap);
-	for (int32 i = 0; i < TotalCap; ++i) { RecordIndexBySlot[i] = INDEX_NONE; }
+	for (int32 i = 0; i < TotalCap; ++i)
+	{
+		RecordIndexBySlot[i] = INDEX_NONE;
+	}
 	SlotAlive.SetNum(TotalCap, false);
 
 	FreeSlots.Reserve(TotalCap);
-	for (int32 i = TotalCap - 1; i >= 0; --i) { FreeSlots.Add(i); }
+	for (int32 i = TotalCap - 1; i >= 0; --i)
+	{
+		FreeSlots.Add(i);
+	}
 
 	TimeSlotIndexBySlot.SetNumZeroed(TotalCap);
 
 	TransformBySlot.SetNum(TotalCap);
-	for (int32 i = 0; i < TotalCap; ++i) { TransformBySlot[i] = FTransform::Identity; }
+	for (int32 i = 0; i < TotalCap; ++i)
+	{
+		TransformBySlot[i] = FTransform::Identity;
+	}
 	TransformDirty.SetNum(TotalCap, false);
 	DirtyTransformSlots.Reset();
 	NewSlotsThisTick.Reset();
@@ -293,18 +302,30 @@ void UGameInstancedAnimationGraphSubsystem::FMeshBucket::GrowCapacity(
 	checkf(NewCapacity > OldCap, TEXT("GIAG: GrowCapacity NewCapacity=%d must exceed OldCap=%d."), NewCapacity, OldCap);
 
 	RecordIndexBySlot.SetNum(NewCapacity);
-	for (int32 i = OldCap; i < NewCapacity; ++i) { RecordIndexBySlot[i] = INDEX_NONE; }
+	for (int32 i = OldCap; i < NewCapacity; ++i)
+	{
+		RecordIndexBySlot[i] = INDEX_NONE;
+	}
 	SlotAlive.SetNum(NewCapacity, false);
 
 	// Push new free slots from high to low so AllocateSlot pops the lowest-index free slot first.
 	FreeSlots.Reserve(FreeSlots.Num() + (NewCapacity - OldCap));
-	for (int32 i = NewCapacity - 1; i >= OldCap; --i) { FreeSlots.Add(i); }
+	for (int32 i = NewCapacity - 1; i >= OldCap; --i)
+	{
+		FreeSlots.Add(i);
+	}
 
 	TimeSlotIndexBySlot.SetNum(NewCapacity);
-	for (int32 i = OldCap; i < NewCapacity; ++i) { TimeSlotIndexBySlot[i] = 0; }
+	for (int32 i = OldCap; i < NewCapacity; ++i)
+	{
+		TimeSlotIndexBySlot[i] = 0;
+	}
 
 	TransformBySlot.SetNum(NewCapacity);
-	for (int32 i = OldCap; i < NewCapacity; ++i) { TransformBySlot[i] = FTransform::Identity; }
+	for (int32 i = OldCap; i < NewCapacity; ++i)
+	{
+		TransformBySlot[i] = FTransform::Identity;
+	}
 	TransformDirty.SetNum(NewCapacity, false);
 
 	const int32 NumNodes = CompiledData.NumNodes;
@@ -1005,18 +1026,18 @@ int32 UGameInstancedAnimationGraphSubsystem::FindOrCreateGroup(UGIAG_AnimGraph* 
 			checkf(!Node.MemberName.IsNone(), TEXT("GIAG: Node %d has no MemberName; cannot address node instances."), NodeIdx);
 
 			// Cache the actual StructProperty on the graph's DefaultGraphInstance.
-			const FProperty* P = DefaultInstanceStruct->FindPropertyByName(Node.MemberName);
-			const FStructProperty* SP = CastField<FStructProperty>(P);
-			checkf(SP && SP->Struct, TEXT("GIAG: Node member '%s' is not a valid struct property on DefaultGraphInstance."), *Node.MemberName.ToString());
-			checkf(SP->Struct->IsChildOf(FGIAG_AnimNodeBase::StaticStruct()),
+			const FProperty* MemberProperty = DefaultInstanceStruct->FindPropertyByName(Node.MemberName);
+			const FStructProperty* StructProp = CastField<FStructProperty>(MemberProperty);
+			checkf(StructProp && StructProp->Struct, TEXT("GIAG: Node member '%s' is not a valid struct property on DefaultGraphInstance."), *Node.MemberName.ToString());
+			checkf(StructProp->Struct->IsChildOf(FGIAG_AnimNodeBase::StaticStruct()),
 				TEXT("GIAG: Node member '%s' is not derived from FGIAG_AnimNodeBase."), *Node.MemberName.ToString());
 
-			const int32 Offset = SP->GetOffset_ForInternal();
+			const int32 Offset = StructProp->GetOffset_ForInternal();
 			checkf(Offset == Node.InstanceDataOffset,
 				TEXT("GIAG: Node member '%s' offset mismatch (Compiled=%d Property=%d). Recompile graph."),
 				*Node.MemberName.ToString(), Node.InstanceDataOffset, Offset);
 
-			UScriptStruct* NodeStruct = SP->Struct;
+			UScriptStruct* NodeStruct = StructProp->Struct;
 			check(NodeStruct);
 
 			const uint32 Size = (uint32)NodeStruct->GetStructureSize();
@@ -1024,7 +1045,7 @@ int32 UGameInstancedAnimationGraphSubsystem::FindOrCreateGroup(UGIAG_AnimGraph* 
 			const uint32 Stride = Align(Size, NodeStruct->GetMinAlignment());
 			check(Stride >= Size);
 
-			Group.NodeProperties[NodeIdx] = SP;
+			Group.NodeProperties[NodeIdx] = StructProp;
 			Group.NodeStrideBytes[NodeIdx] = Stride;
 			checkf(!Group.NodeIndexByMemberName.Contains(Node.MemberName),
 				TEXT("GIAG: duplicate node MemberName '%s' in graph '%s'."), *Node.MemberName.ToString(), *GetNameSafe(AnimGraph));
@@ -1088,30 +1109,30 @@ int32 UGameInstancedAnimationGraphSubsystem::FindOrCreateGroup(UGIAG_AnimGraph* 
 			for (int32 NodeIdx = 0; NodeIdx < Compiled.NumNodes; ++NodeIdx)
 			{
 				Group.OptionalSRVKeyByNodeBySlot[NodeIdx].SetNumZeroed(Group.MaxOptionalSRVSlot + 1);
-				for (const TPair<uint8, FGIAG_AnimResourceKey>& P : NodeSlotKeysTmp[NodeIdx])
+				for (const TPair<uint8, FGIAG_AnimResourceKey>& SlotKeyPair : NodeSlotKeysTmp[NodeIdx])
 				{
-					if ((int32)P.Key <= Group.MaxOptionalSRVSlot)
+					if ((int32)SlotKeyPair.Key <= Group.MaxOptionalSRVSlot)
 					{
-						Group.OptionalSRVKeyByNodeBySlot[NodeIdx][(int32)P.Key] = P.Value;
+						Group.OptionalSRVKeyByNodeBySlot[NodeIdx][(int32)SlotKeyPair.Key] = SlotKeyPair.Value;
 					}
 				}
 			}
 
 			// Build per-key bytes once per World (SharedResourcesByKey) and enqueue incremental uploads for RT.
-			for (const TPair<FGIAG_AnimResourceKey, FUniqueResourceSource>& KV : UniqueResources)
+			for (const TPair<FGIAG_AnimResourceKey, FUniqueResourceSource>& Pair : UniqueResources)
 			{
-				const FUniqueResourceSource& Src = KV.Value;
-				check(Src.Meta);
+				const FUniqueResourceSource& Source = Pair.Value;
+				check(Source.Meta);
 
-				FSharedResourceEntry* Existing = SharedResourcesByKey.Find(KV.Key);
+				FSharedResourceEntry* Existing = SharedResourcesByKey.Find(Pair.Key);
 				if (!Existing)
 				{
 					FSharedResourceEntry NewEntry;
-					NewEntry.Request = Src.Request;
+					NewEntry.Request = Source.Request;
 					NewEntry.Bytes = MakeShared<TArray<uint8>>();
-					const bool bOk = Src.Meta->BuildResourceForGPU(Src.Request, Src.Settings, Skeleton, *NewEntry.Bytes);
+					const bool bOk = Source.Meta->BuildResourceForGPU(Source.Request, Source.Settings, Skeleton, *NewEntry.Bytes);
 					check(bOk);
-					Existing = &SharedResourcesByKey.Add(KV.Key, MoveTemp(NewEntry));
+					Existing = &SharedResourcesByKey.Add(Pair.Key, MoveTemp(NewEntry));
 
 					FGIAG_AnimGraphResourceUploadRun Run;
 					Run.Request = Existing->Request;
@@ -1121,9 +1142,9 @@ int32 UGameInstancedAnimationGraphSubsystem::FindOrCreateGroup(UGIAG_AnimGraph* 
 				else
 				{
 					// Contract: same key must imply identical layout.
-					check(Existing->Request.Layout.Kind == Src.Request.Layout.Kind);
-					check(Existing->Request.Layout.StrideBytes == Src.Request.Layout.StrideBytes);
-					check(Existing->Request.Layout.NumElements == Src.Request.Layout.NumElements);
+					check(Existing->Request.Layout.Kind == Source.Request.Layout.Kind);
+					check(Existing->Request.Layout.StrideBytes == Source.Request.Layout.StrideBytes);
+					check(Existing->Request.Layout.NumElements == Source.Request.Layout.NumElements);
 				}
 			}
 		}
@@ -1539,10 +1560,22 @@ void UGameInstancedAnimationGraphSubsystem::GrowMasterBucketAndFollowers(int32 M
 			continue;
 		}
 		FMeshBucket& Other = *It;
-		if (!Other.TransformProvider || !Other.ISKMC) { continue; }
-		if (Other.TransformProvider->GetMode() != EGIAG_TransformProviderMode::FollowerCopyOrRemap) { continue; }
-		if (Other.TransformProvider->GetMasterState().GetReference() != MasterState) { continue; }
-		if (Other.GetTotalSlotCapacity() >= NewCapacity) { continue; }
+		if (!Other.TransformProvider || !Other.ISKMC)
+		{
+			continue;
+		}
+		if (Other.TransformProvider->GetMode() != EGIAG_TransformProviderMode::FollowerCopyOrRemap)
+		{
+			continue;
+		}
+		if (Other.TransformProvider->GetMasterState().GetReference() != MasterState)
+		{
+			continue;
+		}
+		if (Other.GetTotalSlotCapacity() >= NewCapacity)
+		{
+			continue;
+		}
 
 		ApplyCapacityToProvider(Other);
 	}
@@ -1573,16 +1606,22 @@ void UGameInstancedAnimationGraphSubsystem::CompactAndShrinkMaster(int32 MasterB
 	//    every live slot at index >= NewCapacity to migrate into [0, NewCapacity).
 	TArray<int32> HighLiveSlots;
 	HighLiveSlots.Reserve(FMath::Max(0, OldCap - NewCapacity));
-	for (int32 S = NewCapacity; S < OldCap; ++S)
+	for (int32 SlotIdx = NewCapacity; SlotIdx < OldCap; ++SlotIdx)
 	{
-		if (MasterBucket.SlotAlive[S]) { HighLiveSlots.Add(S); }
+		if (MasterBucket.SlotAlive[SlotIdx])
+		{
+			HighLiveSlots.Add(SlotIdx);
+		}
 	}
 
 	TArray<int32> LowFreeSlots;
 	LowFreeSlots.Reserve(HighLiveSlots.Num());
-	for (int32 S = 0; S < NewCapacity && LowFreeSlots.Num() < HighLiveSlots.Num(); ++S)
+	for (int32 SlotIdx = 0; SlotIdx < NewCapacity && LowFreeSlots.Num() < HighLiveSlots.Num(); ++SlotIdx)
 	{
-		if (!MasterBucket.SlotAlive[S]) { LowFreeSlots.Add(S); }
+		if (!MasterBucket.SlotAlive[SlotIdx])
+		{
+			LowFreeSlots.Add(SlotIdx);
+		}
 	}
 	checkf(LowFreeSlots.Num() == HighLiveSlots.Num(),
 		TEXT("GIAG: shrink to %d cannot fit %d high-slot lives in %d low-slot frees (used=%d, OldCap=%d)."),
@@ -1593,11 +1632,23 @@ void UGameInstancedAnimationGraphSubsystem::CompactAndShrinkMaster(int32 MasterB
 	FGIAG_TransformProviderState* MasterStateRaw = MasterBucket.TransformProvider->GetState().GetReference();
 	for (auto FIt = Buckets.CreateIterator(); FIt; ++FIt)
 	{
-		if (FIt.GetIndex() == MasterBucketIndex) { continue; }
+		if (FIt.GetIndex() == MasterBucketIndex)
+		{
+			continue;
+		}
 		FMeshBucket& Other = *FIt;
-		if (!Other.TransformProvider || !Other.ISKMC) { continue; }
-		if (Other.TransformProvider->GetMode() != EGIAG_TransformProviderMode::FollowerCopyOrRemap) { continue; }
-		if (Other.TransformProvider->GetMasterState().GetReference() != MasterStateRaw) { continue; }
+		if (!Other.TransformProvider || !Other.ISKMC)
+		{
+			continue;
+		}
+		if (Other.TransformProvider->GetMode() != EGIAG_TransformProviderMode::FollowerCopyOrRemap)
+		{
+			continue;
+		}
+		if (Other.TransformProvider->GetMasterState().GetReference() != MasterStateRaw)
+		{
+			continue;
+		}
 		FollowerBucketIndices.Add(FIt.GetIndex());
 	}
 
@@ -1664,7 +1715,10 @@ void UGameInstancedAnimationGraphSubsystem::CompactAndShrinkMaster(int32 MasterB
 		auto MoveAliveListEntry = [OldSlot, NewSlot](TArray<uint32>& AliveSlots, TArray<int32>& IndexBySlot)
 		{
 			const int32 ListIdx = IndexBySlot[OldSlot];
-			if (ListIdx == INDEX_NONE) { return; }
+			if (ListIdx == INDEX_NONE)
+			{
+				return;
+			}
 			AliveSlots[ListIdx] = (uint32)NewSlot;
 			IndexBySlot[NewSlot] = ListIdx;
 			IndexBySlot[OldSlot] = INDEX_NONE;
@@ -1693,7 +1747,10 @@ void UGameInstancedAnimationGraphSubsystem::CompactAndShrinkMaster(int32 MasterB
 			{
 				if (!AnimRecords.IsValidIndex(FollowIndex)) { continue; }
 				FInstancedAnimRecord& FollowRec = AnimRecords[FollowIndex];
-				if (FollowRec.SlotIndex != OldSlot) { continue; }
+				if (FollowRec.SlotIndex != OldSlot)
+				{
+					continue;
+				}
 				FollowRec.SlotIndex = NewSlot;
 				if (FollowRec.ISKMC != nullptr)
 				{
@@ -1705,9 +1762,12 @@ void UGameInstancedAnimationGraphSubsystem::CompactAndShrinkMaster(int32 MasterB
 
 	// 3) Rebuild FreeSlots from inactive low slots only (anything in [NewCapacity, OldCap) is gone).
 	MasterBucket.FreeSlots.Reset();
-	for (int32 S = NewCapacity - 1; S >= 0; --S)
+	for (int32 SlotIdx = NewCapacity - 1; SlotIdx >= 0; --SlotIdx)
 	{
-		if (!MasterBucket.SlotAlive[S]) { MasterBucket.FreeSlots.Add(S); }
+		if (!MasterBucket.SlotAlive[SlotIdx])
+		{
+			MasterBucket.FreeSlots.Add(SlotIdx);
+		}
 	}
 
 	// 4) Truncate per-slot CPU arrays.
@@ -1767,10 +1827,16 @@ void UGameInstancedAnimationGraphSubsystem::CompactAndShrinkMaster(int32 MasterB
 void UGameInstancedAnimationGraphSubsystem::ReserveBucketCapacity(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph, int32 Count)
 {
 	check(IsInGameThread());
-	if (!SkeletalMesh || !AnimGraph || Count <= 0) { return; }
+	if (!SkeletalMesh || !AnimGraph || Count <= 0)
+	{
+		return;
+	}
 
 	USkeleton* Skeleton = SkeletalMesh->GetSkeleton();
-	if (!Skeleton) { return; }
+	if (!Skeleton)
+	{
+		return;
+	}
 
 	const int32 GroupIndex = FindOrCreateGroup(AnimGraph, Skeleton);
 	const int32 BucketIndex = FindOrCreateBucket(SkeletalMesh, GroupIndex);
@@ -1788,29 +1854,54 @@ void UGameInstancedAnimationGraphSubsystem::ReserveBucketCapacity(USkeletalMesh*
 void UGameInstancedAnimationGraphSubsystem::ShrinkBucket(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph)
 {
 	check(IsInGameThread());
-	if (!SkeletalMesh || !AnimGraph) { return; }
+	if (!SkeletalMesh || !AnimGraph)
+	{
+		return;
+	}
 
 	USkeleton* Skeleton = SkeletalMesh->GetSkeleton();
-	if (!Skeleton) { return; }
+	if (!Skeleton)
+	{
+		return;
+	}
 
 	int32 GroupIndex = INDEX_NONE;
 	for (auto It = Groups.CreateIterator(); It; ++It)
 	{
-		if (It->AnimGraph == AnimGraph && It->Skeleton == Skeleton) { GroupIndex = It.GetIndex(); break; }
+		if (It->AnimGraph == AnimGraph && It->Skeleton == Skeleton)
+		{
+			GroupIndex = It.GetIndex();
+			break;
+		}
 	}
-	if (GroupIndex == INDEX_NONE) { return; }
+	if (GroupIndex == INDEX_NONE)
+	{
+		return;
+	}
 
 	const FBucketKey Key{ SkeletalMesh, GroupIndex, /*bFollower=*/false };
 	const int32* Found = BucketByKey.Find(Key);
-	if (!Found) { return; }
+	if (!Found)
+	{
+		return;
+	}
 
 	FMeshBucket& Bucket = Buckets[*Found];
-	if (!Bucket.bStorageInitialized || !Bucket.TransformProvider) { return; }
-	if (Bucket.TransformProvider->GetMode() != EGIAG_TransformProviderMode::MasterEvaluate) { return; }
+	if (!Bucket.bStorageInitialized || !Bucket.TransformProvider)
+	{
+		return;
+	}
+	if (Bucket.TransformProvider->GetMode() != EGIAG_TransformProviderMode::MasterEvaluate)
+	{
+		return;
+	}
 
 	const int32 OldCap = Bucket.GetTotalSlotCapacity();
 	const int32 TargetCap = GIAG::BucketCapacity::ComputeShrinkTarget(Bucket.NumInstances, OldCap);
-	if (TargetCap >= OldCap) { return; }
+	if (TargetCap >= OldCap)
+	{
+		return;
+	}
 
 	// Manual shrink ignores the same-frame grow flap guard (caller asked explicitly). The call below
 	// queues the RT capacity change + slot-move plan onto SharedState->PendingCapacityChange_RT;
@@ -1828,18 +1919,30 @@ void UGameInstancedAnimationGraphSubsystem::ShrinkAllBuckets()
 	for (auto It = Buckets.CreateIterator(); It; ++It)
 	{
 		FMeshBucket& Bucket = *It;
-		if (!Bucket.bStorageInitialized || !Bucket.TransformProvider) { continue; }
-		if (Bucket.TransformProvider->GetMode() != EGIAG_TransformProviderMode::MasterEvaluate) { continue; }
+		if (!Bucket.bStorageInitialized || !Bucket.TransformProvider)
+		{
+			continue;
+		}
+		if (Bucket.TransformProvider->GetMode() != EGIAG_TransformProviderMode::MasterEvaluate)
+		{
+			continue;
+		}
 		MasterIndices.Add(It.GetIndex());
 	}
 
 	for (const int32 MasterIndex : MasterIndices)
 	{
-		if (!Buckets.IsValidIndex(MasterIndex)) { continue; }
+		if (!Buckets.IsValidIndex(MasterIndex))
+		{
+			continue;
+		}
 		FMeshBucket& Bucket = Buckets[MasterIndex];
 		const int32 OldCap = Bucket.GetTotalSlotCapacity();
 		const int32 TargetCap = GIAG::BucketCapacity::ComputeShrinkTarget(Bucket.NumInstances, OldCap);
-		if (TargetCap >= OldCap) { continue; }
+		if (TargetCap >= OldCap)
+		{
+			continue;
+		}
 		CompactAndShrinkMaster(MasterIndex, TargetCap);
 	}
 }
@@ -2075,12 +2178,12 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddIns
 	{
 		const FGIAG_AnimCompiledNode& Node = Group.Compiled->Nodes[NodeIdx];
 		check(Node.NodeMeta);
-		const FStructProperty* SP = Group.NodeProperties[NodeIdx];
-		check(SP && SP->Struct);
+		const FStructProperty* StructProp = Group.NodeProperties[NodeIdx];
+		check(StructProp && StructProp->Struct);
 
 		uint8* NodePtr = Bucket->GetNodePtr(NodeIdx, AllocatedSlot);
-		SP->Struct->InitializeStruct(NodePtr);
-		SP->Struct->CopyScriptStruct(NodePtr, Group.NodeProperties[NodeIdx]->ContainerPtrToValuePtr<void>(DefaultGraphInstance.GetMemory()));
+		StructProp->Struct->InitializeStruct(NodePtr);
+		StructProp->Struct->CopyScriptStruct(NodePtr, Group.NodeProperties[NodeIdx]->ContainerPtrToValuePtr<void>(DefaultGraphInstance.GetMemory()));
 		Node.NodeMeta->InitInstanceData(NodePtr);
 	}
 
@@ -3281,10 +3384,10 @@ void UGameInstancedAnimationGraphSubsystem::RemoveInstance(FGameInstancedAnimati
 		check(Group.NodeProperties.Num() == Group.Compiled->NumNodes);
 		for (int32 NodeIdx = 0; NodeIdx < Group.Compiled->NumNodes; ++NodeIdx)
 		{
-			const FStructProperty* SP = Group.NodeProperties[NodeIdx];
-			check(SP && SP->Struct);
+			const FStructProperty* StructProp = Group.NodeProperties[NodeIdx];
+			check(StructProp && StructProp->Struct);
 			uint8* NodePtr = Bucket.GetNodePtr(NodeIdx, BucketSlot);
-			SP->Struct->DestroyStruct(NodePtr);
+			StructProp->Struct->DestroyStruct(NodePtr);
 			FMemory::Memzero(NodePtr, (SIZE_T)Bucket.NodeStrideBytes[NodeIdx]);
 		}
 
@@ -3399,10 +3502,10 @@ void UGameInstancedAnimationGraphSubsystem::RemoveInstance(FGameInstancedAnimati
 	check(Group.NodeProperties.Num() == Group.Compiled->NumNodes);
 	for (int32 NodeIdx = 0; NodeIdx < Group.Compiled->NumNodes; ++NodeIdx)
 	{
-		const FStructProperty* SP = Group.NodeProperties[NodeIdx];
-		check(SP && SP->Struct);
+		const FStructProperty* StructProp = Group.NodeProperties[NodeIdx];
+		check(StructProp && StructProp->Struct);
 		uint8* NodePtr = Bucket.GetNodePtr(NodeIdx, BucketSlot);
-		SP->Struct->DestroyStruct(NodePtr);
+		StructProp->Struct->DestroyStruct(NodePtr);
 		FMemory::Memzero(NodePtr, (SIZE_T)Bucket.NodeStrideBytes[NodeIdx]);
 	}
 
@@ -4225,9 +4328,15 @@ void UGameInstancedAnimationGraphSubsystem::Tick(float DeltaTime)
 					const int32 BucketSlot = (int32)SlotU;
 
 					const int32 RecordIndex = Bucket.RecordIndexBySlot[BucketSlot];
-					if (RecordIndex == INDEX_NONE) continue;
+					if (RecordIndex == INDEX_NONE)
+					{
+						continue;
+					}
 					const FInstancedAnimRecord& Rec = AnimRecords[RecordIndex];
-					if (Rec.MasterRecordIndex != INDEX_NONE) continue;
+					if (Rec.MasterRecordIndex != INDEX_NONE)
+					{
+						continue;
+					}
 
 					if (const int32* EnabledSerial = DebugReadbackEnabledSerialByRecordIndex.Find(RecordIndex))
 					{

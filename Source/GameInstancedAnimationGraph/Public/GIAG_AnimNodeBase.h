@@ -533,19 +533,19 @@ namespace GIAG::Detail
 #if defined(_MSC_VER)
 		// MSVC: "...GIAG_EnumValueName<FGIAG_Foo::EInputPin::Bar>(void)"
 		constexpr std::string_view Sig = __FUNCSIG__;
-		const size_t L = Sig.find('<');
-		const size_t R = Sig.rfind('>');
-		static_assert(L != std::string_view::npos && R != std::string_view::npos && R > L, "GIAG: unexpected __FUNCSIG__ format.");
-		constexpr std::string_view Name = GIAG_ExtractEnumValueNameFromTemplateArg(Sig.substr(L + 1, R - L - 1));
+		const size_t LBracePos = Sig.find('<');
+		const size_t RBracePos = Sig.rfind('>');
+		static_assert(LBracePos != std::string_view::npos && RBracePos != std::string_view::npos && RBracePos > LBracePos, "GIAG: unexpected __FUNCSIG__ format.");
+		constexpr std::string_view Name = GIAG_ExtractEnumValueNameFromTemplateArg(Sig.substr(LBracePos + 1, RBracePos - LBracePos - 1));
 		static_assert(GIAG_IsValidEnumValueIdent(Name), "GIAG: failed to extract a valid enum value identifier name.");
 		return Name;
 #else
 		// Clang/GCC: "...GIAG_EnumValueName() [V = FGIAG_Foo::EInputPin::Bar]"
 		constexpr std::string_view Sig = __PRETTY_FUNCTION__;
 		constexpr std::string_view Key = "V = ";
-		const size_t K = Sig.find(Key);
-		static_assert(K != std::string_view::npos, "GIAG: unexpected __PRETTY_FUNCTION__ format.");
-		const size_t Start = K + Key.size();
+		const size_t KeyPos = Sig.find(Key);
+		static_assert(KeyPos != std::string_view::npos, "GIAG: unexpected __PRETTY_FUNCTION__ format.");
+		const size_t Start = KeyPos + Key.size();
 		const size_t End = Sig.find(']', Start);
 		static_assert(End != std::string_view::npos && End > Start, "GIAG: unexpected __PRETTY_FUNCTION__ format (missing closing ']').");
 		constexpr std::string_view Name = GIAG_ExtractEnumValueNameFromTemplateArg(Sig.substr(Start, End - Start));
@@ -585,9 +585,9 @@ struct TGIAG_AnimNodeMeta : IGIAG_AnimNodeMeta
 
 	bool HasCullLogic() const override
 	{
-		static constexpr bool bHasCpuCull = requires(const T& Self, uint32 N)
+		static constexpr bool bHasCpuCull = requires(const T& Self, uint32 NumInputs)
 		{
-			Self.ComputeCullNeedMaskCPU(N);
+			Self.ComputeCullNeedMaskCPU(NumInputs);
 		};
 		static constexpr bool bHasHlslCull = requires(FString& Out, const TCHAR*& ElemType, const TCHAR*& MemberName)
 		{
@@ -620,7 +620,7 @@ struct TGIAG_AnimNodeMeta : IGIAG_AnimNodeMeta
 			T::ComputeCullNeedMasksCPU(Context, NodeIndices, OutNeedMasks);
 			return;
 		}
-		else if constexpr (requires(const T& Self, uint32 N) { Self.ComputeCullNeedMaskCPU(N); })
+		else if constexpr (requires(const T& Self, uint32 NumInputs) { Self.ComputeCullNeedMaskCPU(NumInputs); })
 		{
 			check(Context.NumInstances > 0);
 			check(Context.ActiveInstanceIndices.Num() == Context.NumInstances);
@@ -702,7 +702,7 @@ struct TGIAG_AnimNodeMeta : IGIAG_AnimNodeMeta
 	{
 		check(PinIndex >= 0 && PinIndex < GetNumInputPins());
 
-		if constexpr (requires(int32 I) { T::GetInputPinName(I); })
+		if constexpr (requires(int32 PinIndex) { T::GetInputPinName(PinIndex); })
 		{
 			return T::GetInputPinName(PinIndex);
 		}
@@ -720,7 +720,7 @@ struct TGIAG_AnimNodeMeta : IGIAG_AnimNodeMeta
 	{
 		check(PinIndex >= 0 && PinIndex < GetNumOutputPins());
 
-		if constexpr (requires(int32 I) { T::GetOutputPinName(I); })
+		if constexpr (requires(int32 PinIndex) { T::GetOutputPinName(PinIndex); })
 		{
 			return T::GetOutputPinName(PinIndex);
 		}

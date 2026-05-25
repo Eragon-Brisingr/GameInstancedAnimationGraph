@@ -74,9 +74,9 @@ uint32 FGIAG_NiagaraAttachRegistry::FindNumInstances(uint32 BucketId) const
 {
 	check(IsInRenderingThread() || IsInParallelRenderingThread());
 	check(BucketId != 0);
-	if (const FEntry* E = ByBucketId.Find(BucketId))
+	if (const FEntry* Entry = ByBucketId.Find(BucketId))
 	{
-		return E->NumInstances;
+		return Entry->NumInstances;
 	}
 	return 0;
 }
@@ -130,9 +130,9 @@ FRHIShaderResourceView* FGIAG_NativeAttachRegistry::FindInstanceOriginSRV(uint32
 {
 	check(IsInRenderingThread() || IsInParallelRenderingThread());
 	check(BucketId != 0);
-	if (const FEntry* E = ByBucketId.Find(BucketId))
+	if (const FEntry* Entry = ByBucketId.Find(BucketId))
 	{
-		return E->InstanceOriginSRV.GetReference();
+		return Entry->InstanceOriginSRV.GetReference();
 	}
 	return nullptr;
 }
@@ -141,9 +141,9 @@ FRHIShaderResourceView* FGIAG_NativeAttachRegistry::FindInstanceTransformSRV(uin
 {
 	check(IsInRenderingThread() || IsInParallelRenderingThread());
 	check(BucketId != 0);
-	if (const FEntry* E = ByBucketId.Find(BucketId))
+	if (const FEntry* Entry = ByBucketId.Find(BucketId))
 	{
-		return E->InstanceTransformSRV.GetReference();
+		return Entry->InstanceTransformSRV.GetReference();
 	}
 	return nullptr;
 }
@@ -152,9 +152,9 @@ uint32 FGIAG_NativeAttachRegistry::FindNumInstances(uint32 BucketId) const
 {
 	check(IsInRenderingThread() || IsInParallelRenderingThread());
 	check(BucketId != 0);
-	if (const FEntry* E = ByBucketId.Find(BucketId))
+	if (const FEntry* Entry = ByBucketId.Find(BucketId))
 	{
-		return E->NumInstances;
+		return Entry->NumInstances;
 	}
 	return 0;
 }

@@ -9,16 +9,20 @@ namespace GIAG::HierarchyTableMaskUtils
 {
 	uint64 MakeMaskTableKeyHash(const USkeleton* Skeleton, UHierarchyTable* Table, uint64 Salt)
 	{
-		const uint64 A = (uint64)PointerHash(Skeleton);
-		const uint64 B = (uint64)PointerHash(Table);
-		const uint64 C = (uint64)(Skeleton ? Skeleton->GetReferenceSkeleton().GetNum() : 0);
-		uint64 D = 0;
+		const uint64 SkeletonHash = (uint64)PointerHash(Skeleton);
+		const uint64 TableHash = (uint64)PointerHash(Table);
+		const uint64 BoneCountHash = (uint64)(Skeleton ? Skeleton->GetReferenceSkeleton().GetNum() : 0);
+		uint64 GuidHash = 0;
 		if (Table)
 		{
 			const FGuid Guid = Table->GetHierarchyGuid();
-			D = ((uint64)Guid.A << 32) ^ (uint64)Guid.B ^ ((uint64)Guid.C << 16) ^ (uint64)Guid.D;
+			GuidHash = ((uint64)Guid.A << 32) ^ (uint64)Guid.B ^ ((uint64)Guid.C << 16) ^ (uint64)Guid.D;
 		}
-		return (A << 32) ^ (B * 0x9E3779B185EBCA87ull) ^ (C * 0xC2B2AE3D27D4EB4Full) ^ (D * 0x165667B19E3779F9ull) ^ Salt;
+		return (SkeletonHash << 32)
+			^ (TableHash * 0x9E3779B185EBCA87ull)
+			^ (BoneCountHash * 0xC2B2AE3D27D4EB4Full)
+			^ (GuidHash * 0x165667B19E3779F9ull)
+			^ Salt;
 	}
 
 	bool BuildPerBoneMaskWeights(const USkeleton* Skeleton, const UHierarchyTable* Table, TArray<float>& OutWeights)
@@ -103,8 +107,8 @@ namespace GIAG::HierarchyTableMaskUtils
 				continue;
 			}
 
-			const float V = Entry->GetValue<FHierarchyTable_ElementType_Mask>()->Value;
-			OutWeights[BoneIndex] = FMath::Clamp(V, 0.0f, 1.0f);
+			const float MaskValue = Entry->GetValue<FHierarchyTable_ElementType_Mask>()->Value;
+			OutWeights[BoneIndex] = FMath::Clamp(MaskValue, 0.0f, 1.0f);
 		}
 
 		return true;

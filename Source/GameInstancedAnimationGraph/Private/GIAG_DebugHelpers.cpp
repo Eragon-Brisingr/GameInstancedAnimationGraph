@@ -32,9 +32,9 @@ void UGIAG_DebugHelpers::DrawDebugSkeletonFromLocalPoseTRS(const UObject* WorldC
 		}
 		check(Parent < NumBones);
 
-		const FVector A = ComponentToWorld.TransformPosition(FVector{ ComponentPose[Parent].GetTranslation() });
-		const FVector B = ComponentToWorld.TransformPosition(FVector{ ComponentPose[BoneIndex].GetTranslation() });
-		DrawDebugLine(World, A, B, Color.ToFColor(true), false, Duration, SDPG_Foreground, Thickness);
+		const FVector ParentWorld = ComponentToWorld.TransformPosition(FVector{ ComponentPose[Parent].GetTranslation() });
+		const FVector ChildWorld = ComponentToWorld.TransformPosition(FVector{ ComponentPose[BoneIndex].GetTranslation() });
+		DrawDebugLine(World, ParentWorld, ChildWorld, Color.ToFColor(true), false, Duration, SDPG_Foreground, Thickness);
 	}
 }
 

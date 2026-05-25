@@ -49,7 +49,10 @@ namespace GIAG
 	FORCEINLINE uint32 AllInputsMask(uint32 NumInputs)
 	{
 		// Keep a safe behavior for large pin counts; graph v1 uses small counts.
-		if (NumInputs >= 32u) { return 0xFFFFFFFFu; }
+		if (NumInputs >= 32u)
+		{
+			return 0xFFFFFFFFu;
+		}
 		return (NumInputs == 0u) ? 0u : ((1u << NumInputs) - 1u);
 	}
 
@@ -85,29 +88,32 @@ namespace GIAG
 		const float SPF = FMath::Max(1.0f / 120.0f, SecondsPerFrame);
 
 		// Mirror shader `GIAG_CalcFrameIndex`:
-		// - loop: T = fmod(T, Len) in [0, Len)
-		// - clamp: T in [0, Len]
-		float T = PlaybackTimeSeconds;
+		// - loop: Time = fmod(Time, Len) in [0, Len)
+		// - clamp: Time in [0, Len]
+		float Time = PlaybackTimeSeconds;
 		if (bLoop)
 		{
 			if (Len > 1e-6f)
 			{
-				T = FMath::Fmod(T, Len);
-				if (T < 0.0f) { T += Len; }
+				Time = FMath::Fmod(Time, Len);
+				if (Time < 0.0f)
+				{
+					Time += Len;
+				}
 			}
 			else
 			{
-				T = 0.0f;
+				Time = 0.0f;
 			}
 		}
 		else
 		{
-			T = FMath::Clamp(T, 0.0f, Len);
+			Time = FMath::Clamp(Time, 0.0f, Len);
 		}
 
 		// Bake formula matches Subsystem: NumFrames = ceil(Len/SPF)+1, so max frame index = ceil(Len/SPF).
 		const int32 MaxFrame = FMath::Max(0, FMath::CeilToInt(Len / SPF));
-		const int32 FrameIndex = FMath::Clamp(FMath::FloorToInt(T / SPF), 0, MaxFrame);
+		const int32 FrameIndex = FMath::Clamp(FMath::FloorToInt(Time / SPF), 0, MaxFrame);
 		return FMath::Min((float)FrameIndex * SPF, Len);
 	}
 }

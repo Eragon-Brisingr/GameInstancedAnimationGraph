@@ -63,8 +63,8 @@ namespace
 			return RuntimeData.bEnabled ? 1.0f : 0.0f;
 		}
 
-		const float T = FMath::Clamp((CurrentTimeSeconds - RuntimeData.LastEnableDisableTimeSeconds) / BlendDurationSeconds, 0.0f, 1.0f);
-		return RuntimeData.bEnabled ? T : (1.0f - T);
+		const float BlendAlpha = FMath::Clamp((CurrentTimeSeconds - RuntimeData.LastEnableDisableTimeSeconds) / BlendDurationSeconds, 0.0f, 1.0f);
+		return RuntimeData.bEnabled ? BlendAlpha : (1.0f - BlendAlpha);
 	}
 
 	static FVector3f ClampToLookAtCone(const FVector3f& AimVector, const FVector3f& ToTarget, float LookAtClampDegrees)
@@ -104,25 +104,25 @@ namespace
 		uint32 NodeIndex,
 		FRDGBufferUAVRef RW_OutPose)
 	{
-		FGIAG_PoseLookAtCS::FParameters* BaseP = GraphBuilder.AllocParameters<FGIAG_PoseLookAtCS::FParameters>();
-		BaseP->NumBones = NumBones;
-		BaseP->NumInstances = NumInstances;
-		GIAG_FillTimeSlotsParameter(BaseP->TimeSlots.GetData(), InTimeSlots);
-		BaseP->BlendDurationSeconds = BlendDurationSeconds;
-		BaseP->LookAtAxisLocal = LookAtAxisLocal;
-		BaseP->LookAtClampDegrees = LookAtClampDegrees;
-		BaseP->NodeIndex = NodeIndex;
-		BaseP->NeedNodeWordsPerSlot = NeedNodeWordsPerSlot;
-		BaseP->BasePose = BasePose;
-		BaseP->NodeParams = NodeParams;
-		BaseP->BoneIndexBuffer = BoneIndexBuffer;
-		BaseP->WorldToComponentBySlot = WorldToComponentBySlot;
-		BaseP->ActiveInstanceIndices = ActiveInstanceIndices;
-		BaseP->TimeSlotIndices = TimeSlotIndicesSRV;
-		BaseP->NeedNodeBits = NeedNodeBits;
-		BaseP->RW_OutPose = RW_OutPose;
+		FGIAG_PoseLookAtCS::FParameters* BaseShaderParams = GraphBuilder.AllocParameters<FGIAG_PoseLookAtCS::FParameters>();
+		BaseShaderParams->NumBones = NumBones;
+		BaseShaderParams->NumInstances = NumInstances;
+		GIAG_FillTimeSlotsParameter(BaseShaderParams->TimeSlots.GetData(), InTimeSlots);
+		BaseShaderParams->BlendDurationSeconds = BlendDurationSeconds;
+		BaseShaderParams->LookAtAxisLocal = LookAtAxisLocal;
+		BaseShaderParams->LookAtClampDegrees = LookAtClampDegrees;
+		BaseShaderParams->NodeIndex = NodeIndex;
+		BaseShaderParams->NeedNodeWordsPerSlot = NeedNodeWordsPerSlot;
+		BaseShaderParams->BasePose = BasePose;
+		BaseShaderParams->NodeParams = NodeParams;
+		BaseShaderParams->BoneIndexBuffer = BoneIndexBuffer;
+		BaseShaderParams->WorldToComponentBySlot = WorldToComponentBySlot;
+		BaseShaderParams->ActiveInstanceIndices = ActiveInstanceIndices;
+		BaseShaderParams->TimeSlotIndices = TimeSlotIndicesSRV;
+		BaseShaderParams->NeedNodeBits = NeedNodeBits;
+		BaseShaderParams->RW_OutPose = RW_OutPose;
 
-		TShaderMapRef<FGIAG_PoseLookAtCS> CS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+		TShaderMapRef<FGIAG_PoseLookAtCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
 		constexpr int32 ThreadsPerGroup = 64;
 		const int64 TotalWorkItems = (int64)NumBones * (int64)NumInstances;
@@ -131,19 +131,19 @@ namespace
 			ThreadsPerGroup,
 			[&](int32 /*ChunkGroups1D*/, int32 GroupOffset1D, const FIntVector& GroupCount)
 			{
-				FGIAG_PoseLookAtCS::FParameters* P = GraphBuilder.AllocParameters<FGIAG_PoseLookAtCS::FParameters>();
-				*P = *BaseP;
-				P->DispatchGroupCountX = (uint32)GroupCount.X;
-				P->DispatchGroupCountY = (uint32)GroupCount.Y;
-				P->DispatchGroupOffset = (uint32)GroupOffset1D;
+				FGIAG_PoseLookAtCS::FParameters* ChunkShaderParams = GraphBuilder.AllocParameters<FGIAG_PoseLookAtCS::FParameters>();
+				*ChunkShaderParams = *BaseShaderParams;
+				ChunkShaderParams->DispatchGroupCountX = (uint32)GroupCount.X;
+				ChunkShaderParams->DispatchGroupCountY = (uint32)GroupCount.Y;
+				ChunkShaderParams->DispatchGroupOffset = (uint32)GroupOffset1D;
 
 				GraphBuilder.AddPass(
 					RDG_EVENT_NAME("GIAG_LookAt"),
-					P,
+					ChunkShaderParams,
 					ERDGPassFlags::Compute,
-					[P, CS, GroupCount](FRHIComputeCommandList& RHICmdList)
+					[ChunkShaderParams, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 					{
-						FComputeShaderUtils::Dispatch(RHICmdList, CS, *P, GroupCount);
+						FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *ChunkShaderParams, GroupCount);
 					});
 			});
 	}

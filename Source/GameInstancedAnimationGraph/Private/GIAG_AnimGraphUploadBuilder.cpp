@@ -75,7 +75,7 @@ FGIAG_AnimGraphUploads FGIAG_AnimGraphUploadBuilder::BuildUploads_GameThread(
 		Run.InstanceIndices.Reserve(DirtySlots.Num());
 		Run.Bytes.SetNumUninitialized((int32)((uint64)StrideBytes * (uint64)DirtySlots.Num()));
 
-		uint8* Dst = Run.Bytes.GetData();
+		uint8* DestinationPtr = Run.Bytes.GetData();
 		for (const uint32 SlotU : DirtySlots)
 		{
 			const int32 SlotIndex = (int32)SlotU;
@@ -93,8 +93,8 @@ FGIAG_AnimGraphUploads FGIAG_AnimGraphUploadBuilder::BuildUploads_GameThread(
 			checkf(Stride == 0 || Stride == StrideBytes, TEXT("GIAG: GatherUploadsGPU stride mismatch (Node=%d Slot=%d Gather=%u Expected=%u)."), NodeIdx, SlotIndex, Stride, StrideBytes);
 
 			Run.InstanceIndices.Add(SlotU + (uint32)SlotOffset);
-			FMemory::Memcpy(Dst, Blob, StrideBytes);
-			Dst += StrideBytes;
+			FMemory::Memcpy(DestinationPtr, Blob, StrideBytes);
+			DestinationPtr += StrideBytes;
 		}
 		DirtySlots.Reset();
 		Uploads.NodeRuns.Add(MoveTemp(Run));

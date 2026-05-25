@@ -63,7 +63,10 @@ namespace
 
 	static UGameInstancedAnimationGraphSubsystem* ResolveSubsysOrNull(FNiagaraSystemInstance* SystemInstance)
 	{
-		if (!SystemInstance) { return nullptr; }
+		if (!SystemInstance)
+		{
+			return nullptr;
+		}
 		UWorld* World = SystemInstance->GetWorld();
 		return World ? World->GetSubsystem<UGameInstancedAnimationGraphSubsystem>() : nullptr;
 	}

@@ -482,9 +482,9 @@ FPrimitiveSceneProxy* UGIAG_AttachMeshComponent::CreateSceneProxy()
 FBoxSphereBounds UGIAG_AttachMeshComponent::CalcBounds(const FTransform& LocalToWorld) const
 {
 	// We don't have per-instance CPU bounds; keep it simple and conservative.
-	const float R = 5.0e6f;
+	const float BoundsRadius = 5.0e6f;
 	const FVector Origin = LocalToWorld.GetLocation();
-	return FBoxSphereBounds(FBox(Origin - FVector(R), Origin + FVector(R)));
+	return FBoxSphereBounds(FBox(Origin - FVector(BoundsRadius), Origin + FVector(BoundsRadius)));
 }
 
 int32 UGIAG_AttachMeshComponent::GetNumMaterials() const

@@ -194,11 +194,11 @@ void FGIAG_SkinningTransformProviderExtension::ProcessAttachOpsAndOutputs_RT(FRD
 					Bucket.AddListCount = V.AddListCount;
 					if (V.AddListPacked.IsValid())
 					{
-						const int32 N = V.AddListPacked->Num();
-						check((uint32)N == V.AddListCount);
-						FRDGBufferDesc Desc = FRDGBufferDesc::CreateStructuredDesc(sizeof(int32), FMath::Max(1, N));
+						const int32 NumAddItems = V.AddListPacked->Num();
+						check((uint32)NumAddItems == V.AddListCount);
+						FRDGBufferDesc Desc = FRDGBufferDesc::CreateStructuredDesc(sizeof(int32), FMath::Max(1, NumAddItems));
 						FRDGBufferRef AddRDG = CreateOrRegisterExternalBuffer(GraphBuilder, Bucket.AddListPackedBuffer, Desc, TEXT("GIAG_Attach_AddListPacked_External"));
-						UploadStructuredBuffer(GraphBuilder, AddRDG, 0, TEXT("GIAG_Attach_Upload_AddListPacked"), sizeof(int32), V.AddListPacked->GetData(), (uint32)N);
+						UploadStructuredBuffer(GraphBuilder, AddRDG, 0, TEXT("GIAG_Attach_Upload_AddListPacked"), sizeof(int32), V.AddListPacked->GetData(), (uint32)NumAddItems);
 						GraphBuilder.SetBufferAccessFinal(AddRDG, ERHIAccess::SRVMask);
 
 						// Defer VM-visible snapshot publish until after we have updated the registry for this bucket.
@@ -651,24 +651,24 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 	// Drain completed debug readbacks (RT -> GT).
 	for (int32 i = PendingLocalPoseReadbacks_RT.Num() - 1; i >= 0; --i)
 	{
-		FPendingLocalPoseReadback& P = PendingLocalPoseReadbacks_RT[i];
-		if (!P.Readback || !P.Readback->IsReady())
+		FPendingLocalPoseReadback& Pending = PendingLocalPoseReadbacks_RT[i];
+		if (!Pending.Readback || !Pending.Readback->IsReady())
 		{
 			continue;
 		}
 
-		void* Ptr = P.Readback->Lock(P.NumBytes);
+		void* Ptr = Pending.Readback->Lock(Pending.NumBytes);
 		check(Ptr);
 
 		FGIAG_LocalPoseReadbackResult Result;
-		Result.RecordIndex = P.RecordIndex;
-		Result.SerialNumber = P.SerialNumber;
-		Result.CpuRequestFrame = P.CpuRequestFrame;
-		Result.NumBones = P.NumBones;
-		Result.LocalPoseTRS.SetNumUninitialized((int32)(P.NumBytes / sizeof(FGIAG_BoneTRS)));
-		FMemory::Memcpy(Result.LocalPoseTRS.GetData(), Ptr, P.NumBytes);
+		Result.RecordIndex = Pending.RecordIndex;
+		Result.SerialNumber = Pending.SerialNumber;
+		Result.CpuRequestFrame = Pending.CpuRequestFrame;
+		Result.NumBones = Pending.NumBones;
+		Result.LocalPoseTRS.SetNumUninitialized((int32)(Pending.NumBytes / sizeof(FGIAG_BoneTRS)));
+		FMemory::Memcpy(Result.LocalPoseTRS.GetData(), Ptr, Pending.NumBytes);
 
-		P.Readback->Unlock();
+		Pending.Readback->Unlock();
 
 		GIAG::DebugReadback::EnqueueLocalPose(MoveTemp(Result));
 		PendingLocalPoseReadbacks_RT.RemoveAtSwap(i, EAllowShrinking::No);
@@ -677,26 +677,26 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 	// Drain completed NeedNodeBits readbacks (RT -> GT).
 	for (int32 i = PendingNeedNodeBitsReadbacks_RT.Num() - 1; i >= 0; --i)
 	{
-		FPendingNeedNodeBitsReadback& P = PendingNeedNodeBitsReadbacks_RT[i];
-		if (!P.Readback || !P.Readback->IsReady())
+		FPendingNeedNodeBitsReadback& Pending = PendingNeedNodeBitsReadbacks_RT[i];
+		if (!Pending.Readback || !Pending.Readback->IsReady())
 		{
 			continue;
 		}
 
-		void* Ptr = P.Readback->Lock(P.NumBytes);
+		void* Ptr = Pending.Readback->Lock(Pending.NumBytes);
 		check(Ptr);
 
 		FGIAG_NeedNodeBitsReadbackResult Result;
-		Result.RecordIndex = P.RecordIndex;
-		Result.SerialNumber = P.SerialNumber;
-		Result.CpuRequestFrame = P.CpuRequestFrame;
-		Result.SlotIndex = P.SlotIndex;
-		Result.NumNodes = P.NumNodes;
-		Result.WordsPerSlot = P.WordsPerSlot;
-		Result.Words.SetNumUninitialized((int32)P.WordsPerSlot);
-		FMemory::Memcpy(Result.Words.GetData(), Ptr, P.NumBytes);
+		Result.RecordIndex = Pending.RecordIndex;
+		Result.SerialNumber = Pending.SerialNumber;
+		Result.CpuRequestFrame = Pending.CpuRequestFrame;
+		Result.SlotIndex = Pending.SlotIndex;
+		Result.NumNodes = Pending.NumNodes;
+		Result.WordsPerSlot = Pending.WordsPerSlot;
+		Result.Words.SetNumUninitialized((int32)Pending.WordsPerSlot);
+		FMemory::Memcpy(Result.Words.GetData(), Ptr, Pending.NumBytes);
 
-		P.Readback->Unlock();
+		Pending.Readback->Unlock();
 
 		GIAG::DebugReadback::EnqueueNeedNodeBits(MoveTemp(Result));
 		PendingNeedNodeBitsReadbacks_RT.RemoveAtSwap(i, EAllowShrinking::No);
@@ -705,23 +705,23 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 	// Drain completed attach FxTransform readbacks (RT -> GT).
 	for (int32 i = PendingAttachFxTransformReadbacks_RT.Num() - 1; i >= 0; --i)
 	{
-		FPendingAttachFxTransformReadback& P = PendingAttachFxTransformReadbacks_RT[i];
-		if (!P.Readback || !P.Readback->IsReady())
+		FPendingAttachFxTransformReadback& Pending = PendingAttachFxTransformReadbacks_RT[i];
+		if (!Pending.Readback || !Pending.Readback->IsReady())
 		{
 			continue;
 		}
 
-		void* Ptr = P.Readback->Lock(P.NumBytes);
+		void* Ptr = Pending.Readback->Lock(Pending.NumBytes);
 		check(Ptr);
 
-		const FGIAG_Transform* V = reinterpret_cast<const FGIAG_Transform*>(Ptr);
+		const FGIAG_Transform* Values = reinterpret_cast<const FGIAG_Transform*>(Ptr);
 		FGIAG_AttachFxTransformReadbackResult Result;
-		Result.BucketId = P.BucketId;
-		Result.OutputIndex = P.OutputIndex;
-		Result.CpuRequestFrame = P.CpuRequestFrame;
-		Result.FxTransform = (V != nullptr) ? V[0] : FGIAG_Transform::Identity;
+		Result.BucketId = Pending.BucketId;
+		Result.OutputIndex = Pending.OutputIndex;
+		Result.CpuRequestFrame = Pending.CpuRequestFrame;
+		Result.FxTransform = (Values != nullptr) ? Values[0] : FGIAG_Transform::Identity;
 
-		P.Readback->Unlock();
+		Pending.Readback->Unlock();
 
 		GIAG::DebugReadback::EnqueueAttachFxTransform(MoveTemp(Result));
 		PendingAttachFxTransformReadbacks_RT.RemoveAtSwap(i, EAllowShrinking::No);
@@ -730,26 +730,26 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 	// Drain completed attach instance buffers readbacks (RT -> GT).
 	for (int32 i = PendingAttachInstanceBuffersReadbacks_RT.Num() - 1; i >= 0; --i)
 	{
-		FPendingAttachInstanceBuffersReadback& P = PendingAttachInstanceBuffersReadbacks_RT[i];
-		if (!P.Readback || !P.Readback->IsReady())
+		FPendingAttachInstanceBuffersReadback& Pending = PendingAttachInstanceBuffersReadbacks_RT[i];
+		if (!Pending.Readback || !Pending.Readback->IsReady())
 		{
 			continue;
 		}
 
-		void* Ptr = P.Readback->Lock(P.NumBytes);
+		void* Ptr = Pending.Readback->Lock(Pending.NumBytes);
 		check(Ptr);
 
-		const FVector4f* V = reinterpret_cast<const FVector4f*>(Ptr); // [0]=Origin, [1..3]=Rows
+		const FVector4f* Values = reinterpret_cast<const FVector4f*>(Ptr); // [0]=Origin, [1..3]=Rows
 		FGIAG_AttachInstanceBuffersReadbackResult Result;
-		Result.BucketId = P.BucketId;
-		Result.OutputIndex = P.OutputIndex;
-		Result.CpuRequestFrame = P.CpuRequestFrame;
-		Result.Origin = FVector3f(V[0].X, V[0].Y, V[0].Z);
-		Result.Row0 = FVector3f(V[1].X, V[1].Y, V[1].Z);
-		Result.Row1 = FVector3f(V[2].X, V[2].Y, V[2].Z);
-		Result.Row2 = FVector3f(V[3].X, V[3].Y, V[3].Z);
+		Result.BucketId = Pending.BucketId;
+		Result.OutputIndex = Pending.OutputIndex;
+		Result.CpuRequestFrame = Pending.CpuRequestFrame;
+		Result.Origin = FVector3f(Values[0].X, Values[0].Y, Values[0].Z);
+		Result.Row0 = FVector3f(Values[1].X, Values[1].Y, Values[1].Z);
+		Result.Row1 = FVector3f(Values[2].X, Values[2].Y, Values[2].Z);
+		Result.Row2 = FVector3f(Values[3].X, Values[3].Y, Values[3].Z);
 
-		P.Readback->Unlock();
+		Pending.Readback->Unlock();
 
 		GIAG::DebugReadback::EnqueueAttachInstanceBuffers(MoveTemp(Result));
 		PendingAttachInstanceBuffersReadbacks_RT.RemoveAtSwap(i, EAllowShrinking::No);
@@ -773,11 +773,17 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 		checkf((int32)Ind.Index >= 0 && (int32)Ind.Index < Context.Proxies.Num(), TEXT("GIAG: invalid proxy index=%d."), (int32)Ind.Index);
 
 		FSkinningSceneExtensionProxy* SceneProxyBase = Context.Proxies[(int32)Ind.Index];
-		if (!SceneProxyBase) continue;
+		if (!SceneProxyBase)
+		{
+			continue;
+		}
 
 		FInstancedSkinningSceneExtensionProxy* SceneProxy = static_cast<FInstancedSkinningSceneExtensionProxy*>(SceneProxyBase);
 		FTransformProviderRenderProxy* ProviderProxyBase = SceneProxy->GetTransformProviderProxy();
-		if (!ProviderProxyBase) continue;
+		if (!ProviderProxyBase)
+		{
+			continue;
+		}
 
 		FGIAG_TransformProviderRenderProxy* OurProxy = static_cast<FGIAG_TransformProviderRenderProxy*>(ProviderProxyBase);
 		const FGIAG_ProviderData& Data = OurProxy->GetData();
@@ -1077,16 +1083,25 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 				TEXT("GIAG: Attach expects FinalPose to be ComponentPose after compile-time convergence."));
 			FRDGBufferSRVRef PoseSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(Outputs.FinalPoseBuffer));
 
-			for (auto& KV : AttachGroupsByStateBucket_RT)
+			for (auto& Pair : AttachGroupsByStateBucket_RT)
 			{
-				const FAttachGroupKey& AttachKey = KV.Key;
-				FAttachGroupRT& AttachGroup = KV.Value;
+				const FAttachGroupKey& AttachKey = Pair.Key;
+				FAttachGroupRT& AttachGroup = Pair.Value;
 
-				if (AttachKey.State != State) { continue; }
-				if (AttachGroup.CPU.Num() == 0 || !AttachGroup.DescUploadBuffer.IsValid()) { continue; }
+				if (AttachKey.State != State)
+				{
+					continue;
+				}
+				if (AttachGroup.CPU.Num() == 0 || !AttachGroup.DescUploadBuffer.IsValid())
+				{
+					continue;
+				}
 
 				FAttachBucketRT* BucketPtr = AttachBuckets_RT.Find(AttachKey.BucketId);
-				if (!BucketPtr || BucketPtr->NumInstances == 0) { continue; }
+				if (!BucketPtr || BucketPtr->NumInstances == 0)
+				{
+					continue;
+				}
 
 				FRDGBufferRef DescRDG = Context.GraphBuilder.RegisterExternalBuffer(AttachGroup.DescUploadBuffer, TEXT("GIAG_Attach_Desc_External"));
 				FRDGBufferSRVRef DescSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(DescRDG));
@@ -1218,18 +1233,24 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 				const uint32 SC = FMath::Max(1u, (uint32)LastParams.SlotCapacity);
 				TArray<uint32> IsActive;
 				IsActive.SetNumZeroed(SC);
-				for (const uint32 SlotIdx : LastParams.ActiveInstanceIndices) { IsActive[SlotIdx] = 1u; }
+				for (const uint32 SlotIdx : LastParams.ActiveInstanceIndices)
+				{
+					IsActive[SlotIdx] = 1u;
+				}
 				FRDGBufferRef IsActiveRDG = CreateStructuredBuffer(
 					Context.GraphBuilder, TEXT("GIAG_FollowerIsActiveBySlot"),
 					sizeof(uint32), SC, IsActive.GetData(), (uint64)sizeof(uint32) * (uint64)SC);
 				IsActiveBySlotSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(IsActiveRDG));
 			}
 
-			for (auto& FollowKV : FollowerGroups_RT)
+			for (auto& FollowerEntry : FollowerGroups_RT)
 			{
-				const FFollowerGroupKey& FollowKey = FollowKV.Key;
-				FFollowerGroupData& FollowGroup = FollowKV.Value;
-				if (FollowKey.MasterState != State) { continue; }
+				const FFollowerGroupKey& FollowKey = FollowerEntry.Key;
+				FFollowerGroupData& FollowGroup = FollowerEntry.Value;
+				if (FollowKey.MasterState != State)
+				{
+					continue;
+				}
 				check(FollowGroup.DstInfos.Num() > 0);
 
 				const uint32 NumDsts = (uint32)FollowGroup.DstInfos.Num();
@@ -1259,7 +1280,10 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 						{
 							TArray<uint32> Identity;
 							Identity.SetNumUninitialized(FollowGroup.NumBones);
-							for (uint32 I = 0; I < FollowGroup.NumBones; ++I) { Identity[I] = I; }
+							for (uint32 BoneIdx = 0; BoneIdx < FollowGroup.NumBones; ++BoneIdx)
+							{
+								Identity[BoneIdx] = BoneIdx;
+							}
 							Context.GraphBuilder.QueueBufferUpload(BoneRemapRDG, Identity.GetData(),
 								sizeof(uint32) * FollowGroup.NumBones, ERDGInitialDataFlags::None);
 						}

@@ -353,7 +353,7 @@ namespace GIAG
 	{
 		constexpr int32 ThreadsPerGroup = 32;
 
-		TShaderMapRef<FGIAG_PoseToTransformBufferCS> CS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+		TShaderMapRef<FGIAG_PoseToTransformBufferCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
 		FRDGBufferSRVRef ActiveIndicesSRV = Params.ActiveInstanceIndices;
 
@@ -372,32 +372,32 @@ namespace GIAG
 			ThreadsPerGroup,
 			[&](int32 /*ChunkGroups1D*/, int32 GroupOffset1D, const FIntVector& GroupCount)
 		{
-			FGIAG_PoseToTransformBufferCS::FParameters* P = GraphBuilder.AllocParameters<FGIAG_PoseToTransformBufferCS::FParameters>();
-			P->NumBones = Params.NumBones;
-			P->NumInstances = Params.NumInstances;
-			P->DispatchGroupCountX = (uint32)GroupCount.X;
-			P->DispatchGroupCountY = (uint32)GroupCount.Y;
-			P->DispatchGroupOffset = (uint32)GroupOffset1D;
-			P->InverseRefPoseTRS = Params.InverseRefPoseTRS;
-			P->PoseTRS = Params.PoseTRS;
-			P->ActiveInstanceIndices = ActiveIndicesSRV;
+			FGIAG_PoseToTransformBufferCS::FParameters* ShaderParams = GraphBuilder.AllocParameters<FGIAG_PoseToTransformBufferCS::FParameters>();
+			ShaderParams->NumBones = Params.NumBones;
+			ShaderParams->NumInstances = Params.NumInstances;
+			ShaderParams->DispatchGroupCountX = (uint32)GroupCount.X;
+			ShaderParams->DispatchGroupCountY = (uint32)GroupCount.Y;
+			ShaderParams->DispatchGroupOffset = (uint32)GroupOffset1D;
+			ShaderParams->InverseRefPoseTRS = Params.InverseRefPoseTRS;
+			ShaderParams->PoseTRS = Params.PoseTRS;
+			ShaderParams->ActiveInstanceIndices = ActiveIndicesSRV;
 
-			P->BaseTransformOffset = Params.BaseTransformOffset;
-			P->BasePreviousTransformOffset = Params.BasePreviousTransformOffset;
-			P->bWritePreviousTransforms = Params.bWritePreviousTransforms;
-			P->MaxTransformCount = Params.MaxTransformCount;
+			ShaderParams->BaseTransformOffset = Params.BaseTransformOffset;
+			ShaderParams->BasePreviousTransformOffset = Params.BasePreviousTransformOffset;
+			ShaderParams->bWritePreviousTransforms = Params.bWritePreviousTransforms;
+			ShaderParams->MaxTransformCount = Params.MaxTransformCount;
 
 			// UE 5.8 skinning transform buffer is float4-indexed; engine helpers handle the format.
-			P->TransformBuffer = GetCompressedBoneTransformSRV(GraphBuilder, Params.TransformBuffer);
-			P->RW_TransformBuffer = GetCompressedBoneTransformUAV(GraphBuilder, Params.TransformBuffer);
+			ShaderParams->TransformBuffer = GetCompressedBoneTransformSRV(GraphBuilder, Params.TransformBuffer);
+			ShaderParams->RW_TransformBuffer = GetCompressedBoneTransformUAV(GraphBuilder, Params.TransformBuffer);
 
 			GraphBuilder.AddPass(
 				RDG_EVENT_NAME("GIAG_PoseToTransformBuffer"),
-				P,
+				ShaderParams,
 				ERDGPassFlags::Compute,
-				[P, CS, GroupCount](FRHIComputeCommandList& RHICmdList)
+				[ShaderParams, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 				{
-					FComputeShaderUtils::Dispatch(RHICmdList, CS, *P, GroupCount);
+					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *ShaderParams, GroupCount);
 				});
 		});
 	}
@@ -423,7 +423,7 @@ namespace GIAG
 			Params.SourcePoseType,
 			Params.DestinationPoseType);
 
-		TShaderMapRef<FGIAG_PoseSpaceConvertCS> CS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+		TShaderMapRef<FGIAG_PoseSpaceConvertCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
 		constexpr int32 ThreadsPerGroup = 64;
 		const int64 TotalWorkItems = (int64)Params.NumBones * (int64)Params.NumInstances;
@@ -432,26 +432,26 @@ namespace GIAG
 			ThreadsPerGroup,
 			[&](int32 /*ChunkGroups1D*/, int32 GroupOffset1D, const FIntVector& GroupCount)
 		{
-			FGIAG_PoseSpaceConvertCS::FParameters* P = GraphBuilder.AllocParameters<FGIAG_PoseSpaceConvertCS::FParameters>();
-			P->NumBones = Params.NumBones;
-			P->NumInstances = Params.NumInstances;
-			P->SourcePoseType = Params.SourcePoseType;
-			P->DestinationPoseType = Params.DestinationPoseType;
-			P->DispatchGroupCountX = (uint32)GroupCount.X;
-			P->DispatchGroupCountY = (uint32)GroupCount.Y;
-			P->DispatchGroupOffset = (uint32)GroupOffset1D;
-			P->ActiveInstanceIndices = Params.ActiveInstanceIndices;
-			P->ParentIndices = Params.ParentIndices;
-			P->SourcePoseTRS = Params.SourcePoseTRS;
-			P->RW_DestinationPoseTRS = Params.RW_DestinationPoseTRS;
+			FGIAG_PoseSpaceConvertCS::FParameters* ShaderParams = GraphBuilder.AllocParameters<FGIAG_PoseSpaceConvertCS::FParameters>();
+			ShaderParams->NumBones = Params.NumBones;
+			ShaderParams->NumInstances = Params.NumInstances;
+			ShaderParams->SourcePoseType = Params.SourcePoseType;
+			ShaderParams->DestinationPoseType = Params.DestinationPoseType;
+			ShaderParams->DispatchGroupCountX = (uint32)GroupCount.X;
+			ShaderParams->DispatchGroupCountY = (uint32)GroupCount.Y;
+			ShaderParams->DispatchGroupOffset = (uint32)GroupOffset1D;
+			ShaderParams->ActiveInstanceIndices = Params.ActiveInstanceIndices;
+			ShaderParams->ParentIndices = Params.ParentIndices;
+			ShaderParams->SourcePoseTRS = Params.SourcePoseTRS;
+			ShaderParams->RW_DestinationPoseTRS = Params.RW_DestinationPoseTRS;
 
 			GraphBuilder.AddPass(
 				RDG_EVENT_NAME("GIAG_PoseSpaceConvert"),
-				P,
+				ShaderParams,
 				ERDGPassFlags::Compute,
-				[P, CS, GroupCount](FRHIComputeCommandList& RHICmdList)
+				[ShaderParams, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 				{
-					FComputeShaderUtils::Dispatch(RHICmdList, CS, *P, GroupCount);
+					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *ShaderParams, GroupCount);
 				});
 		});
 	}
@@ -462,7 +462,7 @@ namespace GIAG
 		check(Params.PoseTRS != nullptr && Params.InverseRefPoseTRS != nullptr);
 		check(Params.DstInfos != nullptr && Params.TransformBuffer != nullptr);
 
-		TShaderMapRef<FGIAG_FollowerPoseToTransformCS> CS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+		TShaderMapRef<FGIAG_FollowerPoseToTransformCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
 		constexpr int32 ThreadsPerGroup = 64;
 		const int64 TotalWorkItems = (int64)Params.NumDsts * (int64)Params.NumSlots * (int64)Params.NumBones;
@@ -471,30 +471,30 @@ namespace GIAG
 			ThreadsPerGroup,
 			[&](int32 /*ChunkGroups1D*/, int32 GroupOffset1D, const FIntVector& GroupCount)
 		{
-			auto* P = GraphBuilder.AllocParameters<FGIAG_FollowerPoseToTransformCS::FParameters>();
-			P->NumBones = Params.NumBones;
-			P->SrcNumBones = Params.SrcNumBones;
-			P->NumSlots = Params.NumSlots;
-			P->NumDsts = Params.NumDsts;
-			P->MaxTransformCount = Params.MaxTransformCount;
-			P->DispatchGroupCountX = (uint32)GroupCount.X;
-			P->DispatchGroupCountY = (uint32)GroupCount.Y;
-			P->DispatchGroupOffset = (uint32)GroupOffset1D;
-			P->PoseTRS = Params.PoseTRS;
-			P->InverseRefPoseTRS = Params.InverseRefPoseTRS;
-			P->BoneRemap = Params.BoneRemap;
-			P->DstInfos = Params.DstInfos;
-			P->IsActiveBySlot = Params.IsActiveBySlot;
-			P->TransformBuffer = GetCompressedBoneTransformSRV(GraphBuilder, Params.TransformBuffer);
-			P->RW_TransformBuffer = GetCompressedBoneTransformUAV(GraphBuilder, Params.TransformBuffer);
+			auto* ShaderParams = GraphBuilder.AllocParameters<FGIAG_FollowerPoseToTransformCS::FParameters>();
+			ShaderParams->NumBones = Params.NumBones;
+			ShaderParams->SrcNumBones = Params.SrcNumBones;
+			ShaderParams->NumSlots = Params.NumSlots;
+			ShaderParams->NumDsts = Params.NumDsts;
+			ShaderParams->MaxTransformCount = Params.MaxTransformCount;
+			ShaderParams->DispatchGroupCountX = (uint32)GroupCount.X;
+			ShaderParams->DispatchGroupCountY = (uint32)GroupCount.Y;
+			ShaderParams->DispatchGroupOffset = (uint32)GroupOffset1D;
+			ShaderParams->PoseTRS = Params.PoseTRS;
+			ShaderParams->InverseRefPoseTRS = Params.InverseRefPoseTRS;
+			ShaderParams->BoneRemap = Params.BoneRemap;
+			ShaderParams->DstInfos = Params.DstInfos;
+			ShaderParams->IsActiveBySlot = Params.IsActiveBySlot;
+			ShaderParams->TransformBuffer = GetCompressedBoneTransformSRV(GraphBuilder, Params.TransformBuffer);
+			ShaderParams->RW_TransformBuffer = GetCompressedBoneTransformUAV(GraphBuilder, Params.TransformBuffer);
 
 			GraphBuilder.AddPass(
 				RDG_EVENT_NAME("GIAG_FollowerPoseToTransform [%s %u]", *Params.DebugName.ToString(), Params.NumDsts),
-				P,
+				ShaderParams,
 				ERDGPassFlags::Compute,
-				[P, CS, GroupCount](FRHIComputeCommandList& RHICmdList)
+				[ShaderParams, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 				{
-					FComputeShaderUtils::Dispatch(RHICmdList, CS, *P, GroupCount);
+					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *ShaderParams, GroupCount);
 				});
 		});
 	}
@@ -507,7 +507,7 @@ namespace GIAG
 			return;
 		}
 
-		TShaderMapRef<FGIAG_BucketCompactionCS> CS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+		TShaderMapRef<FGIAG_BucketCompactionCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
 		constexpr int32 ThreadsPerGroup = 64;
 		const int64 TransformsPerMove = (int64)Params.MaxTransformCount * 2;
@@ -517,24 +517,24 @@ namespace GIAG
 			ThreadsPerGroup,
 			[&](int32 /*ChunkGroups1D*/, int32 GroupOffset1D, const FIntVector& GroupCount)
 		{
-			auto* P = GraphBuilder.AllocParameters<FGIAG_BucketCompactionCS::FParameters>();
-			P->NumMoves            = Params.NumMoves;
-			P->MaxTransformCount   = Params.MaxTransformCount;
-			P->BaseSpanOffsetBytes = Params.BaseSpanOffsetBytes;
-			P->DispatchGroupCountX = (uint32)GroupCount.X;
-			P->DispatchGroupCountY = (uint32)GroupCount.Y;
-			P->DispatchGroupOffset = (uint32)GroupOffset1D;
-			P->SlotMoves           = Params.SlotMoves;
-			P->TransformBuffer     = GetCompressedBoneTransformSRV(GraphBuilder, Params.TransformBuffer);
-			P->RW_TransformBuffer  = GetCompressedBoneTransformUAV(GraphBuilder, Params.TransformBuffer);
+			auto* ShaderParams = GraphBuilder.AllocParameters<FGIAG_BucketCompactionCS::FParameters>();
+			ShaderParams->NumMoves            = Params.NumMoves;
+			ShaderParams->MaxTransformCount   = Params.MaxTransformCount;
+			ShaderParams->BaseSpanOffsetBytes = Params.BaseSpanOffsetBytes;
+			ShaderParams->DispatchGroupCountX = (uint32)GroupCount.X;
+			ShaderParams->DispatchGroupCountY = (uint32)GroupCount.Y;
+			ShaderParams->DispatchGroupOffset = (uint32)GroupOffset1D;
+			ShaderParams->SlotMoves           = Params.SlotMoves;
+			ShaderParams->TransformBuffer     = GetCompressedBoneTransformSRV(GraphBuilder, Params.TransformBuffer);
+			ShaderParams->RW_TransformBuffer  = GetCompressedBoneTransformUAV(GraphBuilder, Params.TransformBuffer);
 
 			GraphBuilder.AddPass(
 				RDG_EVENT_NAME("GIAG_BucketCompaction (%u moves)", Params.NumMoves),
-				P,
+				ShaderParams,
 				ERDGPassFlags::Compute,
-				[P, CS, GroupCount](FRHIComputeCommandList& RHICmdList)
+				[ShaderParams, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 				{
-					FComputeShaderUtils::Dispatch(RHICmdList, CS, *P, GroupCount);
+					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *ShaderParams, GroupCount);
 				});
 		});
 	}
@@ -548,7 +548,7 @@ namespace GIAG
 		check(Params.AttachDescs != nullptr);
 		check(Params.RW_FxTransform != nullptr);
 
-		TShaderMapRef<FGIAG_AttachToTransformBufferCS> CS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+		TShaderMapRef<FGIAG_AttachToTransformBufferCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
 		constexpr int32 ThreadsPerGroup = 64;
 		const int64 TotalWorkItems = (int64)Params.NumAttachments;
@@ -557,24 +557,24 @@ namespace GIAG
 			ThreadsPerGroup,
 			[&](int32 /*ChunkGroups1D*/, int32 GroupOffset1D, const FIntVector& GroupCount)
 		{
-			auto* P = GraphBuilder.AllocParameters<FGIAG_AttachToTransformBufferCS::FParameters>();
-			P->NumBones = Params.NumBones;
-			P->NumAttachments = Params.NumAttachments;
-			P->DispatchGroupCountX = (uint32)GroupCount.X;
-			P->DispatchGroupCountY = (uint32)GroupCount.Y;
-			P->DispatchGroupOffset = (uint32)GroupOffset1D;
-			P->PoseTRS = Params.PoseTRS;
-			P->ComponentToWorldBySlot = Params.ComponentToWorldBySlot;
-			P->AttachDescs = Params.AttachDescs;
-			P->RW_FxTransform = Params.RW_FxTransform;
+			auto* ShaderParams = GraphBuilder.AllocParameters<FGIAG_AttachToTransformBufferCS::FParameters>();
+			ShaderParams->NumBones = Params.NumBones;
+			ShaderParams->NumAttachments = Params.NumAttachments;
+			ShaderParams->DispatchGroupCountX = (uint32)GroupCount.X;
+			ShaderParams->DispatchGroupCountY = (uint32)GroupCount.Y;
+			ShaderParams->DispatchGroupOffset = (uint32)GroupOffset1D;
+			ShaderParams->PoseTRS = Params.PoseTRS;
+			ShaderParams->ComponentToWorldBySlot = Params.ComponentToWorldBySlot;
+			ShaderParams->AttachDescs = Params.AttachDescs;
+			ShaderParams->RW_FxTransform = Params.RW_FxTransform;
 
 			GraphBuilder.AddPass(
 				RDG_EVENT_NAME("GIAG_AttachToTransformBuffer(Num=%u)", Params.NumAttachments),
-				P,
+				ShaderParams,
 				ERDGPassFlags::Compute,
-				[P, CS, GroupCount](FRHIComputeCommandList& RHICmdList)
+				[ShaderParams, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 				{
-					FComputeShaderUtils::Dispatch(RHICmdList, CS, *P, GroupCount);
+					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *ShaderParams, GroupCount);
 				});
 		});
 	}
@@ -589,7 +589,7 @@ namespace GIAG
 		check(Params.RW_InstanceOrigin != nullptr);
 		check(Params.RW_InstanceTransform != nullptr);
 
-		TShaderMapRef<FGIAG_AttachToISMInstanceBuffersCS> CS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+		TShaderMapRef<FGIAG_AttachToISMInstanceBuffersCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
 		constexpr int32 ThreadsPerGroup = 64;
 		const int64 TotalWorkItems = (int64)Params.NumAttachments;
@@ -598,25 +598,25 @@ namespace GIAG
 			ThreadsPerGroup,
 			[&](int32 /*ChunkGroups1D*/, int32 GroupOffset1D, const FIntVector& GroupCount)
 		{
-			auto* P = GraphBuilder.AllocParameters<FGIAG_AttachToISMInstanceBuffersCS::FParameters>();
-			P->NumBones = Params.NumBones;
-			P->NumAttachments = Params.NumAttachments;
-			P->DispatchGroupCountX = (uint32)GroupCount.X;
-			P->DispatchGroupCountY = (uint32)GroupCount.Y;
-			P->DispatchGroupOffset = (uint32)GroupOffset1D;
-			P->PoseTRS = Params.PoseTRS;
-			P->ComponentToWorldBySlot = Params.ComponentToWorldBySlot;
-			P->AttachDescs = Params.AttachDescs;
-			P->RW_InstanceOrigin = Params.RW_InstanceOrigin;
-			P->RW_InstanceTransform = Params.RW_InstanceTransform;
+			auto* ShaderParams = GraphBuilder.AllocParameters<FGIAG_AttachToISMInstanceBuffersCS::FParameters>();
+			ShaderParams->NumBones = Params.NumBones;
+			ShaderParams->NumAttachments = Params.NumAttachments;
+			ShaderParams->DispatchGroupCountX = (uint32)GroupCount.X;
+			ShaderParams->DispatchGroupCountY = (uint32)GroupCount.Y;
+			ShaderParams->DispatchGroupOffset = (uint32)GroupOffset1D;
+			ShaderParams->PoseTRS = Params.PoseTRS;
+			ShaderParams->ComponentToWorldBySlot = Params.ComponentToWorldBySlot;
+			ShaderParams->AttachDescs = Params.AttachDescs;
+			ShaderParams->RW_InstanceOrigin = Params.RW_InstanceOrigin;
+			ShaderParams->RW_InstanceTransform = Params.RW_InstanceTransform;
 
 			GraphBuilder.AddPass(
 				RDG_EVENT_NAME("GIAG_AttachToISMInstanceBuffers(Num=%u)", Params.NumAttachments),
-				P,
+				ShaderParams,
 				ERDGPassFlags::Compute,
-				[P, CS, GroupCount](FRHIComputeCommandList& RHICmdList)
+				[ShaderParams, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 				{
-					FComputeShaderUtils::Dispatch(RHICmdList, CS, *P, GroupCount);
+					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *ShaderParams, GroupCount);
 				});
 		});
 	}
@@ -628,7 +628,7 @@ namespace GIAG
 			return;
 		}
 
-		TShaderMapRef<FGIAG_ScatterWriteFxTransformCS> CS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+		TShaderMapRef<FGIAG_ScatterWriteFxTransformCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
 		constexpr int32 ThreadsPerGroup = 64;
 		const int64 TotalWorkItems = (int64)Params.NumWrites;
@@ -637,22 +637,22 @@ namespace GIAG
 			ThreadsPerGroup,
 			[&](int32 /*ChunkGroups1D*/, int32 GroupOffset1D, const FIntVector& GroupCount)
 		{
-			auto* P = GraphBuilder.AllocParameters<FGIAG_ScatterWriteFxTransformCS::FParameters>();
-			P->NumWrites = Params.NumWrites;
-			P->DispatchGroupCountX = (uint32)GroupCount.X;
-			P->DispatchGroupCountY = (uint32)GroupCount.Y;
-			P->DispatchGroupOffset = (uint32)GroupOffset1D;
-			P->OutputIndices = Params.OutputIndices;
-			P->ValuesTransform = Params.ValuesTransform;
-			P->RW_FxTransform = Params.RW_FxTransform;
+			auto* ShaderParams = GraphBuilder.AllocParameters<FGIAG_ScatterWriteFxTransformCS::FParameters>();
+			ShaderParams->NumWrites = Params.NumWrites;
+			ShaderParams->DispatchGroupCountX = (uint32)GroupCount.X;
+			ShaderParams->DispatchGroupCountY = (uint32)GroupCount.Y;
+			ShaderParams->DispatchGroupOffset = (uint32)GroupOffset1D;
+			ShaderParams->OutputIndices = Params.OutputIndices;
+			ShaderParams->ValuesTransform = Params.ValuesTransform;
+			ShaderParams->RW_FxTransform = Params.RW_FxTransform;
 
 			GraphBuilder.AddPass(
 				RDG_EVENT_NAME("GIAG_ScatterWriteFxTransform"),
-				P,
+				ShaderParams,
 				ERDGPassFlags::Compute,
-				[P, CS, GroupCount](FRHIComputeCommandList& RHICmdList)
+				[ShaderParams, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 				{
-					FComputeShaderUtils::Dispatch(RHICmdList, CS, *P, GroupCount);
+					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *ShaderParams, GroupCount);
 				});
 		});
 	}
@@ -664,7 +664,7 @@ namespace GIAG
 			return;
 		}
 
-		TShaderMapRef<FGIAG_ScatterWriteInstanceBuffersCS> CS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+		TShaderMapRef<FGIAG_ScatterWriteInstanceBuffersCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
 		constexpr int32 ThreadsPerGroup = 64;
 		const int64 TotalWorkItems = (int64)Params.NumWrites;
@@ -673,23 +673,23 @@ namespace GIAG
 			ThreadsPerGroup,
 			[&](int32 /*ChunkGroups1D*/, int32 GroupOffset1D, const FIntVector& GroupCount)
 		{
-			auto* P = GraphBuilder.AllocParameters<FGIAG_ScatterWriteInstanceBuffersCS::FParameters>();
-			P->NumWrites = Params.NumWrites;
-			P->DispatchGroupCountX = (uint32)GroupCount.X;
-			P->DispatchGroupCountY = (uint32)GroupCount.Y;
-			P->DispatchGroupOffset = (uint32)GroupOffset1D;
-			P->OutputIndices = Params.OutputIndices;
-			P->ValuesTransform = Params.ValuesTransform;
-			P->RW_InstanceOrigin = Params.RW_InstanceOrigin;
-			P->RW_InstanceTransform = Params.RW_InstanceTransform;
+			auto* ShaderParams = GraphBuilder.AllocParameters<FGIAG_ScatterWriteInstanceBuffersCS::FParameters>();
+			ShaderParams->NumWrites = Params.NumWrites;
+			ShaderParams->DispatchGroupCountX = (uint32)GroupCount.X;
+			ShaderParams->DispatchGroupCountY = (uint32)GroupCount.Y;
+			ShaderParams->DispatchGroupOffset = (uint32)GroupOffset1D;
+			ShaderParams->OutputIndices = Params.OutputIndices;
+			ShaderParams->ValuesTransform = Params.ValuesTransform;
+			ShaderParams->RW_InstanceOrigin = Params.RW_InstanceOrigin;
+			ShaderParams->RW_InstanceTransform = Params.RW_InstanceTransform;
 
 			GraphBuilder.AddPass(
 				RDG_EVENT_NAME("GIAG_ScatterWriteInstanceBuffers"),
-				P,
+				ShaderParams,
 				ERDGPassFlags::Compute,
-				[P, CS, GroupCount](FRHIComputeCommandList& RHICmdList)
+				[ShaderParams, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 				{
-					FComputeShaderUtils::Dispatch(RHICmdList, CS, *P, GroupCount);
+					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *ShaderParams, GroupCount);
 				});
 		});
 	}
@@ -706,7 +706,7 @@ namespace GIAG
 			return;
 		}
 
-		TShaderMapRef<FGIAG_ScatterWriteTransformsBySlotCS> CS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+		TShaderMapRef<FGIAG_ScatterWriteTransformsBySlotCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
 		constexpr int32 ThreadsPerGroup = 64;
 		const int64 TotalWorkItems = (int64)Params.NumWrites;
@@ -715,24 +715,24 @@ namespace GIAG
 			ThreadsPerGroup,
 			[&](int32 /*ChunkGroups1D*/, int32 GroupOffset1D, const FIntVector& GroupCount)
 		{
-			auto* P = GraphBuilder.AllocParameters<FGIAG_ScatterWriteTransformsBySlotCS::FParameters>();
-			P->NumWrites = Params.NumWrites;
-			P->DispatchGroupCountX = (uint32)GroupCount.X;
-			P->DispatchGroupCountY = (uint32)GroupCount.Y;
-			P->DispatchGroupOffset = (uint32)GroupOffset1D;
-			P->OutputIndices = Params.OutputIndices;
-			P->ValuesComponentToWorld = Params.ValuesComponentToWorld;
-			P->ValuesWorldToComponent = Params.ValuesWorldToComponent;
-			P->RW_ComponentToWorldBySlot = Params.RW_ComponentToWorldBySlot;
-			P->RW_WorldToComponentBySlot = Params.RW_WorldToComponentBySlot;
+			auto* ShaderParams = GraphBuilder.AllocParameters<FGIAG_ScatterWriteTransformsBySlotCS::FParameters>();
+			ShaderParams->NumWrites = Params.NumWrites;
+			ShaderParams->DispatchGroupCountX = (uint32)GroupCount.X;
+			ShaderParams->DispatchGroupCountY = (uint32)GroupCount.Y;
+			ShaderParams->DispatchGroupOffset = (uint32)GroupOffset1D;
+			ShaderParams->OutputIndices = Params.OutputIndices;
+			ShaderParams->ValuesComponentToWorld = Params.ValuesComponentToWorld;
+			ShaderParams->ValuesWorldToComponent = Params.ValuesWorldToComponent;
+			ShaderParams->RW_ComponentToWorldBySlot = Params.RW_ComponentToWorldBySlot;
+			ShaderParams->RW_WorldToComponentBySlot = Params.RW_WorldToComponentBySlot;
 
 			GraphBuilder.AddPass(
 				RDG_EVENT_NAME("GIAG_ScatterWriteTransformsBySlot"),
-				P,
+				ShaderParams,
 				ERDGPassFlags::Compute,
-				[P, CS, GroupCount](FRHIComputeCommandList& RHICmdList)
+				[ShaderParams, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 				{
-					FComputeShaderUtils::Dispatch(RHICmdList, CS, *P, GroupCount);
+					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *ShaderParams, GroupCount);
 				});
 		});
 	}
@@ -750,7 +750,7 @@ namespace GIAG
 			return;
 		}
 
-		TShaderMapRef<FGIAG_ScatterWriteBytesByIndexCS> CS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+		TShaderMapRef<FGIAG_ScatterWriteBytesByIndexCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
 		constexpr int32 ThreadsPerGroup = 64;
 		const int64 TotalWorkItems = (int64)Params.NumWrites;
@@ -759,23 +759,23 @@ namespace GIAG
 			ThreadsPerGroup,
 			[&](int32 /*ChunkGroups1D*/, int32 GroupOffset1D, const FIntVector& GroupCount)
 		{
-			auto* P = GraphBuilder.AllocParameters<FGIAG_ScatterWriteBytesByIndexCS::FParameters>();
-			P->NumWrites = Params.NumWrites;
-			P->StrideBytes = Params.StrideBytes;
-			P->DispatchGroupCountX = (uint32)GroupCount.X;
-			P->DispatchGroupCountY = (uint32)GroupCount.Y;
-			P->DispatchGroupOffset = (uint32)GroupOffset1D;
-			P->OutputIndices = Params.OutputIndices;
-			P->ValuesBytes = Params.ValuesBytes;
-			P->RW_DstBytes = Params.RW_DstBytes;
+			auto* ShaderParams = GraphBuilder.AllocParameters<FGIAG_ScatterWriteBytesByIndexCS::FParameters>();
+			ShaderParams->NumWrites = Params.NumWrites;
+			ShaderParams->StrideBytes = Params.StrideBytes;
+			ShaderParams->DispatchGroupCountX = (uint32)GroupCount.X;
+			ShaderParams->DispatchGroupCountY = (uint32)GroupCount.Y;
+			ShaderParams->DispatchGroupOffset = (uint32)GroupOffset1D;
+			ShaderParams->OutputIndices = Params.OutputIndices;
+			ShaderParams->ValuesBytes = Params.ValuesBytes;
+			ShaderParams->RW_DstBytes = Params.RW_DstBytes;
 
 			GraphBuilder.AddPass(
 				RDG_EVENT_NAME("GIAG_ScatterWriteBytesByIndex(Stride=%u)", Params.StrideBytes),
-				P,
+				ShaderParams,
 				ERDGPassFlags::Compute,
-				[P, CS, GroupCount](FRHIComputeCommandList& RHICmdList)
+				[ShaderParams, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 				{
-					FComputeShaderUtils::Dispatch(RHICmdList, CS, *P, GroupCount);
+					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *ShaderParams, GroupCount);
 				});
 		});
 	}
@@ -787,7 +787,7 @@ namespace GIAG
 			return;
 		}
 
-		TShaderMapRef<FGIAG_FillUintBufferCS> CS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+		TShaderMapRef<FGIAG_FillUintBufferCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
 		constexpr int32 ThreadsPerGroup = 256;
 		const int64 TotalWorkItems = (int64)Params.NumDwords;
@@ -796,21 +796,21 @@ namespace GIAG
 			ThreadsPerGroup,
 			[&](int32 /*ChunkGroups1D*/, int32 GroupOffset1D, const FIntVector& GroupCount)
 		{
-			auto* P = GraphBuilder.AllocParameters<FGIAG_FillUintBufferCS::FParameters>();
-			P->NumDwords = Params.NumDwords;
-			P->Value = Params.Value;
-			P->DispatchGroupCountX = (uint32)GroupCount.X;
-			P->DispatchGroupCountY = (uint32)GroupCount.Y;
-			P->DispatchGroupOffset = (uint32)GroupOffset1D;
-			P->RW_Out = Params.RW_Out;
+			auto* ShaderParams = GraphBuilder.AllocParameters<FGIAG_FillUintBufferCS::FParameters>();
+			ShaderParams->NumDwords = Params.NumDwords;
+			ShaderParams->Value = Params.Value;
+			ShaderParams->DispatchGroupCountX = (uint32)GroupCount.X;
+			ShaderParams->DispatchGroupCountY = (uint32)GroupCount.Y;
+			ShaderParams->DispatchGroupOffset = (uint32)GroupOffset1D;
+			ShaderParams->RW_Out = Params.RW_Out;
 
 			GraphBuilder.AddPass(
 				RDG_EVENT_NAME("GIAG_FillUintBuffer(Value=%u)", Params.Value),
-				P,
+				ShaderParams,
 				ERDGPassFlags::Compute,
-				[P, CS, GroupCount](FRHIComputeCommandList& RHICmdList)
+				[ShaderParams, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
 				{
-					FComputeShaderUtils::Dispatch(RHICmdList, CS, *P, GroupCount);
+					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *ShaderParams, GroupCount);
 				});
 		});
 	}
@@ -846,31 +846,31 @@ namespace GIAG
 
 		check(Params.ShaderMap != nullptr);
 
-		TShaderMapRef<FGIAG_GraphCullCS> CS(Params.ShaderMap);
+		TShaderMapRef<FGIAG_GraphCullCS> ComputeShader(Params.ShaderMap);
 
 		const uint32 ThreadsPerGroup = 64;
 		const uint32 GroupCountX = FMath::DivideAndRoundUp<uint32>(Params.NumInstances, ThreadsPerGroup);
 
-		FGIAG_GraphCullPassParameters* P = GraphBuilder.AllocParameters<FGIAG_GraphCullPassParameters>();
-		P->ActiveInstanceIndices = Params.ActiveInstanceIndices;
-		P->RW_NeedNodeBits = Params.RW_NeedNodeBits;
+		FGIAG_GraphCullPassParameters* ShaderParams = GraphBuilder.AllocParameters<FGIAG_GraphCullPassParameters>();
+		ShaderParams->ActiveInstanceIndices = Params.ActiveInstanceIndices;
+		ShaderParams->RW_NeedNodeBits = Params.RW_NeedNodeBits;
 		for (uint32 i = 0; i < (uint32)GIAG::MaxGraphCullParamBuffers; ++i)
 		{
-			P->CullParams[i] = nullptr;
+			ShaderParams->CullParams[i] = nullptr;
 		}
 		checkf(Params.CullParams.Num() <= (int32)GIAG::MaxGraphCullParamBuffers,
 			TEXT("GIAG: GraphCull CullParams exceeds MaxGraphCullParamBuffers (%d > %u)."),
 			Params.CullParams.Num(), (uint32)GIAG::MaxGraphCullParamBuffers);
 		for (int32 i = 0; i < Params.CullParams.Num(); ++i)
 		{
-			P->CullParams[i] = Params.CullParams[i];
+			ShaderParams->CullParams[i] = Params.CullParams[i];
 		}
 
 		GraphBuilder.AddPass(
 			RDG_EVENT_NAME("GIAG_GraphCull(Nodes=%u Active=%u)", Params.NumNodes, Params.NumInstances),
-			P,
+			ShaderParams,
 			ERDGPassFlags::Compute,
-			[P, CS,
+			[ShaderParams, ComputeShader,
 				GroupCountX,
 				NumNodes = Params.NumNodes,
 				NumInstances = Params.NumInstances,
@@ -878,32 +878,32 @@ namespace GIAG
 				WordsPerSlot = Params.WordsPerSlot,
 				FinalNodeIndex = Params.FinalNodeIndex](FRHIComputeCommandList& RHICmdList)
 			{
-				FRHIComputeShader* ShaderRHI = CS.GetComputeShader();
+				FRHIComputeShader* ShaderRHI = ComputeShader.GetComputeShader();
 				SetComputePipelineState(RHICmdList, ShaderRHI);
 
 				FRHIBatchedShaderParameters& Batched = RHICmdList.GetScratchShaderParameters();
-				CS->SetParameters(
+				ComputeShader->SetParameters(
 					Batched,
 					NumNodes,
 					NumInstances,
 					SlotCapacity,
 					WordsPerSlot,
 					FinalNodeIndex,
-					P->ActiveInstanceIndices->GetRHI(),
-					P->RW_NeedNodeBits->GetRHI());
+					ShaderParams->ActiveInstanceIndices->GetRHI(),
+					ShaderParams->RW_NeedNodeBits->GetRHI());
 
 				for (uint32 i = 0; i < (uint32)GIAG::MaxGraphCullParamBuffers; ++i)
 				{
-					if (P->CullParams[i] != nullptr)
+					if (ShaderParams->CullParams[i] != nullptr)
 					{
 						const uint32 BaseIndex = (uint32)GIAG::GraphCullParamSRVRegisterBase + i;
-						Batched.SetShaderResourceViewParameter(BaseIndex, P->CullParams[i]->GetRHI());
+						Batched.SetShaderResourceViewParameter(BaseIndex, ShaderParams->CullParams[i]->GetRHI());
 					}
 				}
 
 				RHICmdList.SetBatchedShaderParameters(ShaderRHI, Batched);
 				RHICmdList.DispatchComputeShader((uint32)GroupCountX, 1, 1);
-				UnsetShaderUAVs(RHICmdList, CS, ShaderRHI);
+				UnsetShaderUAVs(RHICmdList, ComputeShader, ShaderRHI);
 			});
 	}
 }

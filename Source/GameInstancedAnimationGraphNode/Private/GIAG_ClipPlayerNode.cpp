@@ -246,16 +246,19 @@ void FGIAG_ClipPlayerNode::AddPassesGPU(const FGIAG_AnimNodeDispatchContext& Con
 
 namespace
 {
-	static float WrapOrClampTime(float T, float Len, bool bLoop)
+	static float WrapOrClampTime(float Time, float Len, bool bLoop)
 	{
 		const float SafeLen = FMath::Max(Len, 1e-6f);
 		if (bLoop)
 		{
-			float X = FMath::Fmod(T, SafeLen);
-			if (X < 0.0f) { X += SafeLen; }
-			return X;
+			float Wrapped = FMath::Fmod(Time, SafeLen);
+			if (Wrapped < 0.0f)
+			{
+				Wrapped += SafeLen;
+			}
+			return Wrapped;
 		}
-		return FMath::Clamp(T, 0.0f, SafeLen);
+		return FMath::Clamp(Time, 0.0f, SafeLen);
 	}
 
 	static float CalcBlendAlpha(float NowSeconds, float BlendStartTime, float BlendDuration)
@@ -269,8 +272,8 @@ namespace
 
 	static void ComputeSlotBlendWeights(
 		float CurrentTimeSeconds,
-		const FGIAG_SlotState& S,
-		uint32 N,
+		const FGIAG_SlotState& SlotState,
+		uint32 NumActiveClips,
 		float& W0,
 		float& W1,
 		float& W2,
@@ -282,29 +285,39 @@ namespace
 		W2 = 0.0f;
 		W3 = 0.0f;
 
-		const float A0 = (N >= 2u) ? CalcBlendAlpha(CurrentTimeSeconds, S.BlendStartTimes[0], S.BlendDurations[0]) : 0.0f;
-		const float A1 = (N >= 3u) ? CalcBlendAlpha(CurrentTimeSeconds, S.BlendStartTimes[1], S.BlendDurations[1]) : 0.0f;
-		const float A2 = (N >= 4u) ? CalcBlendAlpha(CurrentTimeSeconds, S.BlendStartTimes[2], S.BlendDurations[2]) : 0.0f;
+		const float A0 = (NumActiveClips >= 2u) ? CalcBlendAlpha(CurrentTimeSeconds, SlotState.BlendStartTimes[0], SlotState.BlendDurations[0]) : 0.0f;
+		const float A1 = (NumActiveClips >= 3u) ? CalcBlendAlpha(CurrentTimeSeconds, SlotState.BlendStartTimes[1], SlotState.BlendDurations[1]) : 0.0f;
+		const float A2 = (NumActiveClips >= 4u) ? CalcBlendAlpha(CurrentTimeSeconds, SlotState.BlendStartTimes[2], SlotState.BlendDurations[2]) : 0.0f;
 
-		if (N >= 3u)
+		if (NumActiveClips >= 3u)
 		{
-			const float ALast = (N == 3u) ? A1 : A2;
+			const float ALast = (NumActiveClips == 3u) ? A1 : A2;
 			if (ALast >= 1.0f - EPS)
 			{
-				if (N == 3u) { W2 = 1.0f; }
-				else { W3 = 1.0f; }
+				if (NumActiveClips == 3u)
+				{
+					W2 = 1.0f;
+				}
+				else
+				{
+					W3 = 1.0f;
+				}
 				return;
 			}
 		}
 
-		if (N == 1u) { W0 = 1.0f; return; }
-		if (N == 2u)
+		if (NumActiveClips == 1u)
+		{
+			W0 = 1.0f;
+			return;
+		}
+		if (NumActiveClips == 2u)
 		{
 			W0 = 1.0f - A0;
 			W1 = A0;
 			return;
 		}
-		if (N == 3u)
+		if (NumActiveClips == 3u)
 		{
 			const float Om1 = 1.0f - A1;
 			W0 = Om1 * (1.0f - A0);
@@ -354,9 +367,9 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 			check(SlotIndex >= 0 && SlotIndex < Context.SlotCapacity);
 
 			const FGIAG_ClipPlayerNode* Node = Context.GetNodePtrBySlot<FGIAG_ClipPlayerNode>(NodeIdx, SlotIndex);
-			const FGIAG_SlotState& S = Node->SlotState;
+			const FGIAG_SlotState& SlotState = Node->SlotState;
 
-			if (S.NumClips == 0)
+			if (SlotState.NumClips == 0)
 			{
 				// No animation: output RefPose (Local).
 				check(Context.RefPoseLocal.Num() == Context.NumBones);
@@ -368,18 +381,18 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 			}
 
 			// Step 1) Compute blend weights (no pose evaluation needed).
-			const uint32 N = FMath::Min<uint32>(4u, (S.NumClips > 0u) ? S.NumClips : 1u);
+			const uint32 NumActiveClips = FMath::Min<uint32>(4u, (SlotState.NumClips > 0u) ? SlotState.NumClips : 1u);
 			float W0 = 0.0f, W1 = 0.0f, W2 = 0.0f, W3 = 0.0f;
-			ComputeSlotBlendWeights(InstanceTime, S, N, W0, W1, W2, W3);
+			ComputeSlotBlendWeights(InstanceTime, SlotState, NumActiveClips, W0, W1, W2, W3);
 
-			const bool bUse0 = (W0 != 0.0f) && (S.NumClips >= 1u);
-			const bool bUse1 = (W1 != 0.0f) && (S.NumClips >= 2u);
-			const bool bUse2 = (W2 != 0.0f) && (S.NumClips >= 3u);
-			const bool bUse3 = (W3 != 0.0f) && (S.NumClips >= 4u);
+			const bool bUse0 = (W0 != 0.0f) && (SlotState.NumClips >= 1u);
+			const bool bUse1 = (W1 != 0.0f) && (SlotState.NumClips >= 2u);
+			const bool bUse2 = (W2 != 0.0f) && (SlotState.NumClips >= 3u);
+			const bool bUse3 = (W3 != 0.0f) && (SlotState.NumClips >= 4u);
 
 			auto ResolveAnim = [&](uint32 ClipSlot) -> const UAnimSequence*
 			{
-				const int32 ClipIndex = S.Clips[ClipSlot].Clip;
+				const int32 ClipIndex = SlotState.Clips[ClipSlot].Clip;
 				check(ClipIndex >= 0);
 				check(Context.AnimSequencesByClipIndex.IsValidIndex(ClipIndex));
 				const UAnimSequence* Anim = Context.AnimSequencesByClipIndex[ClipIndex];
@@ -390,7 +403,7 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 			auto ComputeSampleTimeSeconds = [&](const UAnimSequence* Anim, uint32 ClipSlot) -> float
 			{
 				const float Len = Anim->GetPlayLength();
-				const float Playback = (InstanceTime - S.Clips[ClipSlot].StartTime) * S.Clips[ClipSlot].PlayRate + S.Clips[ClipSlot].StartSeconds;
+				const float Playback = (InstanceTime - SlotState.Clips[ClipSlot].StartTime) * SlotState.Clips[ClipSlot].PlayRate + SlotState.Clips[ClipSlot].StartSeconds;
 #if WITH_EDITOR
 				if (GIAG::bQuantTimeInCpuEval)
 				{
@@ -400,10 +413,10 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 					{
 						SecondsPerFrame = UserData->SecondsPerFrame;
 					}
-					return GIAG::QuantTime(Playback, Len, SecondsPerFrame, S.Clips[ClipSlot].bLoop != 0u);
+					return GIAG::QuantTime(Playback, Len, SecondsPerFrame, SlotState.Clips[ClipSlot].bLoop != 0u);
 				}
 #endif
-				return WrapOrClampTime(Playback, Len, S.Clips[ClipSlot].bLoop != 0u);
+				return WrapOrClampTime(Playback, Len, SlotState.Clips[ClipSlot].bLoop != 0u);
 			};
 
 			// Step 2) Fast-path: a single clip contributes -> evaluate just that clip and write directly.
@@ -518,20 +531,23 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 				else { Ref = T3.GetRotation(); }
 				Ref.Normalize();
 
-				auto AddAlignedWeighted = [&Ref](FQuat4f& Accum, FQuat4f Q, float W)
+				auto AddAlignedWeighted = [&Ref](FQuat4f& Accum, FQuat4f Quat, float Weight)
 				{
-					if (W == 0.0f)
+					if (Weight == 0.0f)
 					{
 						return;
 					}
-					if ((Ref | Q) < 0.0f)
+					if ((Ref | Quat) < 0.0f)
 					{
-						Q.X = -Q.X; Q.Y = -Q.Y; Q.Z = -Q.Z; Q.W = -Q.W;
+						Quat.X = -Quat.X;
+						Quat.Y = -Quat.Y;
+						Quat.Z = -Quat.Z;
+						Quat.W = -Quat.W;
 					}
-					Accum.X += Q.X * W;
-					Accum.Y += Q.Y * W;
-					Accum.Z += Q.Z * W;
-					Accum.W += Q.W * W;
+					Accum.X += Quat.X * Weight;
+					Accum.Y += Quat.Y * Weight;
+					Accum.Z += Quat.Z * Weight;
+					Accum.W += Quat.W * Weight;
 				};
 
 				FQuat4f Q = FQuat4f(0, 0, 0, 0);

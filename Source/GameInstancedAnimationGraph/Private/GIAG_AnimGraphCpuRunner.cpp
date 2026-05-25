@@ -118,11 +118,11 @@ void FGIAG_AnimGraphCpuRunner::EnsureResourceCache(
 
 			if (!UniqueResources.Contains(Request.ShareKey))
 			{
-				FUniqueResourceSource Src;
-				Src.Request = Request;
-				Src.Meta = Node.NodeMeta;
-				Src.Settings = Node.Settings;
-				UniqueResources.Add(Request.ShareKey, Src);
+				FUniqueResourceSource Source;
+				Source.Request = Request;
+				Source.Meta = Node.NodeMeta;
+				Source.Settings = Node.Settings;
+				UniqueResources.Add(Request.ShareKey, Source);
 			}
 		}
 	}
@@ -151,17 +151,17 @@ void FGIAG_AnimGraphCpuRunner::EnsureResourceCache(
 	}
 
 	// Build CPU bytes for all unique resources now (deterministic).
-	for (const TPair<FGIAG_AnimResourceKey, FUniqueResourceSource>& KV : UniqueResources)
+	for (const TPair<FGIAG_AnimResourceKey, FUniqueResourceSource>& Pair : UniqueResources)
 	{
-		const FGIAG_AnimResourceKey& ShareKey = KV.Key;
-		const FUniqueResourceSource& Src = KV.Value;
-		if (!Src.Meta)
+		const FGIAG_AnimResourceKey& ShareKey = Pair.Key;
+		const FUniqueResourceSource& Source = Pair.Value;
+		if (!Source.Meta)
 		{
 			continue;
 		}
 
 		TSharedPtr<void> Resource;
-		const bool bOk = Src.Meta->BuildResourceForCPU(Src.Request, Src.Settings, Skeleton, Resource);
+		const bool bOk = Source.Meta->BuildResourceForCPU(Source.Request, Source.Settings, Skeleton, Resource);
 		checkf(bOk && Resource.IsValid(),
 			TEXT("GIAG CPU: failed to build CPU resource for optional ShareKey."));
 		ResourcesByKey.Add(ShareKey, MoveTemp(Resource));
@@ -296,9 +296,9 @@ FGIAG_AnimGraphCpuRunner::FOutputs FGIAG_AnimGraphCpuRunner::Evaluate(
 			// Reverse topological order (batched by type): when a node is needed, mark its needed inputs as needed.
 			// This is equivalent to iterating ExecOrder from back to front, but uses pre-built reverse batches.
 			checkf(CompiledData.ReverseDispatchSchedule.Num() > 0, TEXT("GIAG CPU: ReverseDispatchSchedule must be built at compile time."));
-			for (const FGIAG_AnimDispatchBatch& RB : CompiledData.ReverseDispatchSchedule)
+			for (const FGIAG_AnimDispatchBatch& ReverseBatch : CompiledData.ReverseDispatchSchedule)
 			{
-				for (const int32 NodeIdx : RB.NodeIndices)
+				for (const int32 NodeIdx : ReverseBatch.NodeIndices)
 				{
 					check(NodeIdx >= 0 && NodeIdx < CompiledData.NumNodes);
 
