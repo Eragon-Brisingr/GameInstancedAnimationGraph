@@ -4,6 +4,7 @@
 #include "GlobalShader.h" // GlobalBeginCompileShader
 #include "ShaderCompiler.h"
 #include "ShaderSerialization.h"
+#include "Serialization/MemoryWriter.h"
 
 #if WITH_EDITOR
 #include "DerivedDataCacheInterface.h"
@@ -49,10 +50,13 @@ FGIAGShaderType::FGIAGShaderType(
 		const TCHAR* InFunctionName,
 		uint32 InFrequency,
 		int32 InTotalPermutationCount,
+		int32 InTotalSpecializationCount,
 		ConstructSerializedType InConstructSerializedRef,
 		ConstructCompiledType InConstructCompiledRef,
 		ShouldCompilePermutationType InShouldCompilePermutationRef,
 		ShouldPrecachePermutationType InShouldPrecachePermutationRef,
+		GetUnspecializedIdType InGetUnspecializedIdRef,
+		GetSpecializationValuesType InGetSpecializationValuesRef,
 		GetRayTracingPayloadTypeType InGetRayTracingPayloadTypeRef,
 		GetShaderBindingLayoutType InGetShaderBindingLayoutTypeRef,
 #if WITH_EDITOR
@@ -74,10 +78,13 @@ FGIAGShaderType::FGIAGShaderType(
 			InFunctionName,
 			InFrequency,
 			InTotalPermutationCount,
+			InTotalSpecializationCount,
 			InConstructSerializedRef,
 			InConstructCompiledRef,
 			InShouldCompilePermutationRef,
 			InShouldPrecachePermutationRef,
+			InGetUnspecializedIdRef,
+			InGetSpecializationValuesRef,
 			InGetRayTracingPayloadTypeRef,
 			InGetShaderBindingLayoutTypeRef,
 #if WITH_EDITOR
@@ -290,7 +297,7 @@ void FGIAGShaderMap::Compile(
 	CompilingId = FShaderCommonCompileJob::GetNextJobId();
 	FShaderCompileJob* NewJob = GShaderCompilingManager->PrepareShaderCompileJob(
 		/*ShaderMapId*/ CompilingId,
-		FShaderCompileJobKey(ShaderType, nullptr, PermutationId),
+		FShaderCompileJobKey(ShaderType, Platform, /*VFType*/ nullptr, PermutationId),
 		EShaderCompileJobPriority::Normal);
 	check(NewJob);
 
@@ -421,7 +428,6 @@ void FGIAGShaderMap::Compile(
 		check(Results.Num() == 1);
 		auto Job = Results[0]->GetSingleShaderJob();
 		check(Job);
-		check(Job->bReleased);
 		Job->bSucceeded = Job->Output.bSucceeded;
 		if (!Job->bSucceeded)
 		{
@@ -441,6 +447,10 @@ void FGIAGShaderMap::Compile(
 		FSHAHash ShaderMapHash;
 		GetContent()->ShaderMapId.GetScriptHash(ShaderMapHash);
 
+		uint64 MaterialShaderMapHash = 0u;
+		static_assert(sizeof(MaterialShaderMapHash) <= sizeof(ShaderMapHash.Hash), "FSHAHash must be at least 8 bytes for uint64 truncation.");
+		FMemory::Memcpy(&MaterialShaderMapHash, ShaderMapHash.Hash, sizeof(MaterialShaderMapHash));
+
 		GetResourceCode()->AddShaderCompilerOutput(Job->Output, Job->Key, Job->Input.GenerateDebugInfo());
 
 		FShader* Shader = Job->Key.ShaderType->ConstructCompiled(
@@ -449,9 +459,9 @@ void FGIAGShaderMap::Compile(
 				static_cast<const FShaderType::FParameters*>(Job->ShaderParameters.Get()),
 				Job->Key.PermutationId,
 				Job->Output,
-				ShaderMapHash,
-				nullptr,
-				nullptr));
+				MaterialShaderMapHash,
+				/*ShaderPipeline*/ nullptr,
+				/*VertexFactoryType*/ nullptr));
 		check(Shader && Shader->GetCodeSize() > 0);
 		check(!GetContent()->HasShader(Job->Key.ShaderType, Job->Key.PermutationId));
 		GetMutableContent()->FindOrAddShader(Job->Key.ShaderType->GetHashedName(), Job->Key.PermutationId, Shader);

@@ -13,6 +13,7 @@
 #include "RHIGPUReadback.h"
 #include "ScenePrivate.h"
 #include "SceneExtensions.h"
+#include "SkinningSceneExtensionProxy.h"
 #include "Animation/Skeleton.h"
 #include "HAL/Event.h"
 #include "Misc/Crc.h"
@@ -589,8 +590,10 @@ struct FFollowerGroupData
 {
 	uint32 NumBones = 0;
 	uint32 SrcNumBones = 0;
+	uint32 MaxTransformCount = 0;
 	const uint32* BoneRemap = nullptr;
-	TArray<GIAG::FFollowerDstInfo> DstInfos;
+	// Per-DstIndex destination byte offset in TransformBuffer (Cur, plus Prev when EDirtyBoneTransforms::Previous fires).
+	TArray<uint32> DstInfos;
 };
 
 void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransformProvider::FProviderContext& Context)
@@ -752,16 +755,14 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 		PendingAttachInstanceBuffersReadbacks_RT.RemoveAtSwap(i, EAllowShrinking::No);
 	}
 
-	// Pass 1: group indirections by State (one group per bucket).
-	struct FMasterShardInfo
-	{
-		uint32 ShardIndex = 0;
-		uint32 TransformOffsetBytes = 0;
-	};
+	// Pass 1: group indirections by State.
 	struct FMasterGroup
 	{
 		FGIAG_TransformProviderState* State = nullptr;
-		TArray<FMasterShardInfo> Shards;
+		uint32 BaseTransformOffset = 0;
+		uint32 PreviousTransformOffset = 0;
+		uint32 MaxTransformCount = 0;
+		EDirtyBoneTransforms DirtyBoneTransforms = EDirtyBoneTransforms::None;
 	};
 	TMap<FGIAG_TransformProviderState*, FMasterGroup> MasterGroupsByState;
 
@@ -771,16 +772,56 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 	{
 		checkf((int32)Ind.Index >= 0 && (int32)Ind.Index < Context.Proxies.Num(), TEXT("GIAG: invalid proxy index=%d."), (int32)Ind.Index);
 
-		const FSkinningSceneExtensionProxy* Proxy = Context.Proxies[(int32)Ind.Index];
-		if (!Proxy) continue;
+		FSkinningSceneExtensionProxy* SceneProxyBase = Context.Proxies[(int32)Ind.Index];
+		if (!SceneProxyBase) continue;
 
-		bool bValid = false;
-		const TConstArrayView<uint64> ProviderData = Proxy->GetAnimationProviderData(bValid);
-		if (!bValid) continue;
+		FInstancedSkinningSceneExtensionProxy* SceneProxy = static_cast<FInstancedSkinningSceneExtensionProxy*>(SceneProxyBase);
+		FTransformProviderRenderProxy* ProviderProxyBase = SceneProxy->GetTransformProviderProxy();
+		if (!ProviderProxyBase) continue;
 
-		checkf(ProviderData.Num() == FGIAG_ProviderData::NumWords(), TEXT("GIAG: ProviderData size mismatch."));
-		const FGIAG_ProviderData& Data = *reinterpret_cast<const FGIAG_ProviderData*>(ProviderData.GetData());
+		FGIAG_TransformProviderRenderProxy* OurProxy = static_cast<FGIAG_TransformProviderRenderProxy*>(ProviderProxyBase);
+		const FGIAG_ProviderData& Data = OurProxy->GetData();
 		checkf(Data.SelfState != nullptr, TEXT("GIAG: ProviderData missing SelfState."));
+
+		// Drain any GT-queued capacity change before we route this Indirection to the master/follower
+		// pass. Order matters: when shrinking we must dispatch the slot-compaction CS BEFORE calling
+		// SetUniqueAnimationCount on the engine ExtensionProxy — the engine's per-frame polling on the
+		// next pre-update sees the new count, allocates a smaller span, and dispatches its own copy
+		// pass which preserves the [0, NewCap) range that we just compacted.
+		// (Grow path has empty PendingSlotMoves; only the SetUniqueAnimationCount call runs and the
+		//  engine-side resize-and-copy preserves Cur+Prev for free.)
+		auto& PendingChange = Data.SelfState->PendingCapacityChange_RT;
+		if (PendingChange.PendingNewCap > 0)
+		{
+			if (PendingChange.PendingSlotMoves.Num() > 0)
+			{
+				const uint32 NumMoves = (uint32)PendingChange.PendingSlotMoves.Num();
+				FRDGBufferRef MoveBuf = CreateStructuredBuffer(
+					Context.GraphBuilder,
+					TEXT("GIAG_BucketCompaction_SlotMoves"),
+					sizeof(FGIAG_TransformProviderState::FGIAG_PendingCapacityChange::FSlotMove),
+					FMath::Max<uint32>(1u, NumMoves),
+					PendingChange.PendingSlotMoves.GetData(),
+					(uint64)sizeof(FGIAG_TransformProviderState::FGIAG_PendingCapacityChange::FSlotMove) * (uint64)NumMoves);
+
+				GIAG::FBucketCompactionPassParams CompactParams;
+				CompactParams.NumMoves            = NumMoves;
+				CompactParams.MaxTransformCount   = SceneProxy->GetMaxBoneTransformCount();
+				// Span base = min(Cur, Prev) byte offset (the smaller of the two equals TransformBufferOffset
+				// since one of CurrentTransformSlot * MaxTransformCount is 0 each frame).
+				CompactParams.BaseSpanOffsetBytes = FMath::Min(Ind.CurrentTransformOffset, Ind.PreviousTransformOffset);
+				CompactParams.SlotMoves           = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(MoveBuf));
+				CompactParams.TransformBuffer     = Context.TransformBuffer;
+				GIAG::AddBucketCompactionPass(Context.GraphBuilder, CompactParams);
+			}
+
+			if (FInstancedSkinningSceneExtensionProxy* EngineProxy = OurProxy->GetEngineExtensionProxy())
+			{
+				EngineProxy->SetUniqueAnimationCount((uint32)PendingChange.PendingNewCap);
+			}
+			PendingChange.PendingNewCap = 0;
+			PendingChange.PendingSlotMoves.Reset();
+		}
 
 		if (Data.Mode == EGIAG_TransformProviderMode::FollowerCopyOrRemap)
 		{
@@ -792,17 +833,26 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 			Group.NumBones = Data.NumBones;
 			Group.SrcNumBones = Data.SrcNumBones;
 			Group.BoneRemap = Data.BoneRemap;
-			Group.DstInfos.Add({ Data.MasterShardIndex * Data.MasterState->SlotsPerShard, Ind.TransformOffset });
+			Group.MaxTransformCount = SceneProxy->GetMaxBoneTransformCount();
+			// Always write Current. Append a Previous DstInfo (Prev = Current) only when the engine flags
+			// EDirtyBoneTransforms::Previous (first frame / re-bind); otherwise the engine's per-frame
+			// Cur/Prev region rotation already places last frame's Cur at PreviousTransformOffset.
+			Group.DstInfos.Add(Ind.CurrentTransformOffset);
+			if (EnumHasAnyFlags(Ind.DirtyBoneTransforms, EDirtyBoneTransforms::Previous))
+			{
+				Group.DstInfos.Add(Ind.PreviousTransformOffset);
+			}
 			continue;
 		}
 
 		checkf(Data.Mode == EGIAG_TransformProviderMode::MasterEvaluate, TEXT("GIAG: unexpected provider mode (%d)."), (int32)Data.Mode);
+		// Master: expect at most one indirection per state (one bucket = one ISKMC).
 		FMasterGroup& MasterGroup = MasterGroupsByState.FindOrAdd(Data.SelfState);
 		MasterGroup.State = Data.SelfState;
-		FMasterShardInfo ShardInfo;
-		ShardInfo.ShardIndex = Data.ShardIndex;
-		ShardInfo.TransformOffsetBytes = Ind.TransformOffset;
-		MasterGroup.Shards.Add(ShardInfo);
+		MasterGroup.BaseTransformOffset = Ind.CurrentTransformOffset;
+		MasterGroup.PreviousTransformOffset = Ind.PreviousTransformOffset;
+		MasterGroup.MaxTransformCount = SceneProxy->GetMaxBoneTransformCount();
+		MasterGroup.DirtyBoneTransforms = Ind.DirtyBoneTransforms;
 	}
 
 	// Pass 2: drain payloads, process AnimLibrary uploads, compute animation once, dispatch followers.
@@ -824,16 +874,14 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 
 			FGIAG_AnimGraphRunParams Params = MoveTemp(Payload.Params);
 			Params.OutputTransformBuffer = Context.TransformBuffer;
-
-			const int32 NumShards = Params.NumShards;
-			Params.ShardTransformOffsets.SetNumZeroed(NumShards);
-			for (const FMasterShardInfo& SI : MasterGroup.Shards)
-			{
-				if ((int32)SI.ShardIndex < NumShards)
-				{
-					Params.ShardTransformOffsets[SI.ShardIndex] = SI.TransformOffsetBytes;
-				}
-			}
+			Params.BaseTransformOffset = MasterGroup.BaseTransformOffset;
+			Params.BasePreviousTransformOffset = MasterGroup.PreviousTransformOffset;
+			// UE alternates Cur/Prev region offsets each frame, so last frame's writes already
+			// live at PreviousTransformOffset. We only need to write Prev when the engine flagged
+			// this slot for re-init via EDirtyBoneTransforms::Previous (first frame after re-bind /
+			// cap change / mode switch). The shader's bWritePreviousTransforms is uint32.
+			Params.bWritePreviousTransforms = EnumHasAnyFlags(MasterGroup.DirtyBoneTransforms, EDirtyBoneTransforms::Previous);
+			Params.MaxTransformCount = MasterGroup.MaxTransformCount;
 
 			FAnimLibraryRTCacheEntry& AnimLib = AnimLibraryBySkeleton_RT.FindOrAdd(FObjectKey(Params.Skeleton));
 			if (Params.AnimLibraryUpload.IsValid() && Params.AnimLibraryUpload->Version > AnimLib.Version)
@@ -1163,7 +1211,7 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 		if (Outputs.FinalPoseBuffer != nullptr && Outputs.InverseRefPoseSRV != nullptr)
 		{
 			FRDGBufferSRVRef FinalPoseSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(Outputs.FinalPoseBuffer));
-			const uint32 SlotsPerShard = (uint32)LastParams.SlotsPerShard;
+			const uint32 NumSlots = (uint32)LastParams.SlotCapacity;
 
 			FRDGBufferSRVRef IsActiveBySlotSRV;
 			{
@@ -1187,8 +1235,8 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 				const uint32 NumDsts = (uint32)FollowGroup.DstInfos.Num();
 				FRDGBufferRef DstInfoRDG = CreateStructuredBuffer(
 					Context.GraphBuilder, TEXT("GIAG_FollowerDstInfos"),
-					sizeof(GIAG::FFollowerDstInfo), NumDsts, FollowGroup.DstInfos.GetData(),
-					(uint64)sizeof(GIAG::FFollowerDstInfo) * (uint64)NumDsts);
+					sizeof(uint32), NumDsts, FollowGroup.DstInfos.GetData(),
+					(uint64)sizeof(uint32) * (uint64)NumDsts);
 				FRDGBufferSRVRef DstInfoSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(DstInfoRDG));
 
 				FRDGBufferSRVRef BoneRemapSRV;
@@ -1213,33 +1261,27 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 							Identity.SetNumUninitialized(FollowGroup.NumBones);
 							for (uint32 I = 0; I < FollowGroup.NumBones; ++I) { Identity[I] = I; }
 							Context.GraphBuilder.QueueBufferUpload(BoneRemapRDG, Identity.GetData(),
-								sizeof(uint32) * FollowGroup.NumBones, ERDGInitialDataFlags::NoCopy);
+								sizeof(uint32) * FollowGroup.NumBones, ERDGInitialDataFlags::None);
 						}
 					}
 					RemapEntry.Num = RemapCount;
 					BoneRemapSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(BoneRemapRDG, PF_R32_UINT));
 				}
 
-				FRDGBufferSRVRef InitPrevSRV;
-				{
-					FRDGBufferRef InitPrevRDG = Context.GraphBuilder.CreateBuffer(
-						FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), FMath::Max(1u, SlotsPerShard)),
-						TEXT("GIAG_FollowerInitPrevBySlotZero"));
-					AddClearUAVPass(Context.GraphBuilder, Context.GraphBuilder.CreateUAV(InitPrevRDG), 0u);
-					InitPrevSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(InitPrevRDG));
-				}
-
+				// The follower pass already keys Prev writes off the per-indirection DirtyBoneTransforms
+				// flag (handled by FFollowerGroupData::DstInfos: an extra DstInfo entry pointing at
+				// PreviousTransformOffset is appended only when EDirtyBoneTransforms::Previous fires).
+				// The shader writes to whatever DstInfos says; no per-slot init signaling needed.
 				GIAG::FFollowerPoseToTransformBufferPassParams FollowParams;
 				FollowParams.NumBones = FollowGroup.NumBones;
 				FollowParams.SrcNumBones = FollowGroup.SrcNumBones;
-				FollowParams.SlotsPerShard = SlotsPerShard;
+				FollowParams.NumSlots = NumSlots;
 				FollowParams.NumDsts = NumDsts;
+				FollowParams.MaxTransformCount = FollowGroup.MaxTransformCount;
 				FollowParams.PoseTRS = FinalPoseSRV;
 				FollowParams.InverseRefPoseTRS = Outputs.InverseRefPoseSRV;
 				FollowParams.DstInfos = DstInfoSRV;
 				FollowParams.BoneRemap = BoneRemapSRV;
-				FollowParams.InitPrevBySlot = InitPrevSRV;
-				FollowParams.ForceInitPrevAllSlots = 1u;
 				FollowParams.IsActiveBySlot = IsActiveBySlotSRV;
 				FollowParams.TransformBuffer = Context.TransformBuffer;
 				FollowParams.DebugName = FollowKey.FollowMeshName;

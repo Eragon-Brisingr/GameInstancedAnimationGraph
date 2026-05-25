@@ -5,6 +5,29 @@
 #include "GIAG_Math.ush"
 
 //------------------------------------------------------------------------------
+// UE skinning transform buffer (Buffer<float4> / RWBuffer<float4>) helpers.
+// Layout: 3 float4 per bone (transposed float3x4 rows), BaseOffset is in BYTES.
+// Mirrors `LoadCompressedBoneTransform` / `StoreCompressedBoneTransform` in
+// /Engine/Private/Skinning/SkinningDataDecode.ush (USE_COMPRESSED_BONE_TRANSFORM=0
+// branch). Inlined here so plugin shaders don't depend on engine private headers.
+//------------------------------------------------------------------------------
+
+float4x3 GIAG_LoadCompressedBoneTransform(Buffer<float4> SrcBuffer, uint BaseOffset, uint BoneIndex)
+{
+	const uint BaseIndex = (BaseOffset >> 4) + BoneIndex * 3u;
+	return transpose(float3x4(SrcBuffer[BaseIndex], SrcBuffer[BaseIndex + 1u], SrcBuffer[BaseIndex + 2u]));
+}
+
+void GIAG_StoreCompressedBoneTransform(RWBuffer<float4> DstBuffer, uint BaseOffset, uint BoneIndex, float4x3 BoneTransform)
+{
+	const uint BaseIndex = (BaseOffset >> 4) + BoneIndex * 3u;
+	const float3x4 Transposed = transpose(BoneTransform);
+	DstBuffer[BaseIndex + 0u] = Transposed[0];
+	DstBuffer[BaseIndex + 1u] = Transposed[1];
+	DstBuffer[BaseIndex + 2u] = Transposed[2];
+}
+
+//------------------------------------------------------------------------------
 // Shared structs (shader-visible layouts)
 //------------------------------------------------------------------------------
 

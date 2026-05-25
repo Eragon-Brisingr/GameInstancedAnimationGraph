@@ -374,9 +374,9 @@ namespace
 	}
 }
 
-const FGIAG_AnimGraphCompiledData& UGIAG_AnimGraph::Compile()
+const FGIAG_AnimGraphCompiledData& UGIAG_AnimGraph::Compile(bool bForce)
 {
-	if (bCompiled)
+	if (bCompiled && bForce == false)
 	{
 		return Compiled;
 	}

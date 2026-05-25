@@ -38,11 +38,6 @@ class FRDGPooledBuffer;
 
 namespace GIAG
 {
-	// UE 5.7 packs `FSkinningHeader::UniqueAnimationCount` into 7 bits (see Engine/Shaders/Shared/SkinningDefinitions.h),
-	// so a single instanced skinned mesh component can expose at most 127 unique animation slots.
-	// We shard components so each stays within this engine constraint; computation data lives on FMeshBucket.
-	static constexpr int32 DefaultSlotsPerShard = 127;
-
 	// ---------------------------------------------------------------------
 	// Node culling (CPU): input need-mask helpers
 	//

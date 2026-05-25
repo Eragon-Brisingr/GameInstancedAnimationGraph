@@ -5,7 +5,6 @@
 
 UGIAG_TransformProviderData::UGIAG_TransformProviderData()
 {
-	bEnabled = true;
 	ConfigureAsMaster();
 }
 
@@ -42,12 +41,10 @@ void UGIAG_TransformProviderData::ConfigureAsFollower(
 	int32 InNumBones,
 	int32 InSrcNumBones,
 	TSharedPtr<const TArray<uint32>> InBoneRemapShared,
-	int32 InMasterShardIndex,
 	FName InFollowMeshName)
 {
 	Mode = EGIAG_TransformProviderMode::FollowerCopyOrRemap;
 	MasterState = InMasterBridge;
-	MasterShardIndex = InMasterShardIndex;
 	NumBones = FMath::Max(0, InNumBones);
 	SrcNumBones = FMath::Max(0, InSrcNumBones);
 	BoneRemapShared = MoveTemp(InBoneRemapShared);
@@ -55,7 +52,7 @@ void UGIAG_TransformProviderData::ConfigureAsFollower(
 	FollowMeshName = InFollowMeshName;
 }
 
-FTransformProviderRenderProxy* UGIAG_TransformProviderData::CreateRenderThreadResources(FSkinningSceneExtensionProxy* SceneProxy, FSceneInterface& Scene, FRHICommandListBase& RHICmdList)
+FTransformProviderRenderProxy* UGIAG_TransformProviderData::CreateRenderProxy(FInstancedSkinningSceneExtensionProxy* ExtensionProxy) const
 {
 	FGIAG_ProviderData ProviderData;
 	ProviderData.AnimationSlotCount = (uint32)GetUniqueAnimationCount();
@@ -65,44 +62,7 @@ FTransformProviderRenderProxy* UGIAG_TransformProviderData::CreateRenderThreadRe
 	ProviderData.NumBones = (uint32)FMath::Max(0, NumBones);
 	ProviderData.SrcNumBones = (uint32)FMath::Max(0, SrcNumBones);
 	ProviderData.BoneRemap = BoneRemapPtr;
-	ProviderData.ShardIndex = ShardIndex;
-	ProviderData.MasterShardIndex = (uint32)MasterShardIndex;
 	ProviderData.FollowMeshName = FollowMeshName;
 
-	// Render proxy must hold refs to keep State/MasterState alive on RT.
-	class FGIAG_TransformProviderRenderProxyWithRefs final : public FTransformProviderRenderProxy
-	{
-	public:
-		FGIAG_TransformProviderRenderProxyWithRefs(const FGIAG_ProviderData& InData, TRefCountPtr<FGIAG_TransformProviderState> InSelf, TRefCountPtr<FGIAG_TransformProviderState> InMaster, TSharedPtr<const TArray<uint32>> InRemap)
-			: Data(InData)
-			, SelfState(MoveTemp(InSelf))
-			, MasterState(MoveTemp(InMaster))
-			, BoneRemapShared(MoveTemp(InRemap))
-		{
-		}
-
-		void CreateRenderThreadResources(FRHICommandListBase& RHICmdList) override {}
-		void DestroyRenderThreadResources() override {}
-
-		const TConstArrayView<uint64> GetProviderData(bool& bOutValid) const override
-		{
-			bOutValid = true;
-			const uint64* Words = reinterpret_cast<const uint64*>(&Data);
-			return TConstArrayView<uint64>(Words, FGIAG_ProviderData::NumWords());
-		}
-
-	private:
-		FGIAG_ProviderData Data;
-		TRefCountPtr<FGIAG_TransformProviderState> SelfState;
-		TRefCountPtr<FGIAG_TransformProviderState> MasterState;
-		TSharedPtr<const TArray<uint32>> BoneRemapShared;
-	};
-
-	return new FGIAG_TransformProviderRenderProxyWithRefs(ProviderData, State, MasterState, BoneRemapShared);
+	return new FGIAG_TransformProviderRenderProxy(ProviderData, ExtensionProxy, State, MasterState, BoneRemapShared);
 }
-
-void UGIAG_TransformProviderData::DestroyRenderThreadResources(FTransformProviderRenderProxy* ProviderProxy)
-{
-	delete ProviderProxy;
-}
-

@@ -12,6 +12,7 @@
 #include "ShaderParameterStruct.h"
 #include "Serialization/MemoryImage.h"
 #include "Misc/Crc.h"
+#include "Skinning/SkinningTransformProvider.h"
 
 namespace
 {
@@ -27,18 +28,16 @@ namespace
 			SHADER_PARAMETER(uint32, DispatchGroupCountX)
 			SHADER_PARAMETER(uint32, DispatchGroupCountY)
 			SHADER_PARAMETER(uint32, DispatchGroupOffset)
-			SHADER_PARAMETER(uint32, ForceInitPrevAllSlots)
-			SHADER_PARAMETER(uint32, SlotsPerShard)
+			SHADER_PARAMETER(uint32, BaseTransformOffset)
+			SHADER_PARAMETER(uint32, BasePreviousTransformOffset)
+			SHADER_PARAMETER(uint32, bWritePreviousTransforms)
+			SHADER_PARAMETER(uint32, MaxTransformCount)
 
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_BoneTRS>, InverseRefPoseTRS)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_BoneTRS>, PoseTRS)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint32>, ActiveInstanceIndices)
-			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint32>, InitPrevBySlot)
-			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint32>, ShardTransformOffsets)
-			SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, TransformBuffer)
-			SHADER_PARAMETER_RDG_BUFFER_UAV(RWByteAddressBuffer, RW_TransformBuffer)
-			SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<FVector4f>, PrevCacheFloat4)
-			SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<FVector4f>, RW_PrevCacheFloat4)
+			SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<FVector4f>, TransformBuffer)
+			SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<FVector4f>, RW_TransformBuffer)
 		END_SHADER_PARAMETER_STRUCT()
 
 		static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters) { return true; }
@@ -96,20 +95,19 @@ namespace
 		BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 			SHADER_PARAMETER(uint32, NumBones)
 			SHADER_PARAMETER(uint32, SrcNumBones)
-			SHADER_PARAMETER(uint32, SlotsPerShard)
+			SHADER_PARAMETER(uint32, NumSlots)
 			SHADER_PARAMETER(uint32, NumDsts)
+			SHADER_PARAMETER(uint32, MaxTransformCount)
 			SHADER_PARAMETER(uint32, DispatchGroupCountX)
 			SHADER_PARAMETER(uint32, DispatchGroupCountY)
 			SHADER_PARAMETER(uint32, DispatchGroupOffset)
-			SHADER_PARAMETER(uint32, ForceInitPrevAllSlots)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_BoneTRS>, PoseTRS)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_BoneTRS>, InverseRefPoseTRS)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, BoneRemap)
-			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<GIAG::FFollowerDstInfo>, DstInfos)
-			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, InitPrevBySlot)
+			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, DstInfos)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, IsActiveBySlot)
-			SHADER_PARAMETER_RDG_BUFFER_SRV(ByteAddressBuffer, TransformBuffer)
-			SHADER_PARAMETER_RDG_BUFFER_UAV(RWByteAddressBuffer, RW_TransformBuffer)
+			SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<FVector4f>, TransformBuffer)
+			SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<FVector4f>, RW_TransformBuffer)
 		END_SHADER_PARAMETER_STRUCT()
 
 		static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters) { return true; }
@@ -120,6 +118,32 @@ namespace
 		}
 	};
 	IMPLEMENT_GLOBAL_SHADER(FGIAG_FollowerPoseToTransformCS, "/GameInstancedAnimationGraphShader/GIAG_FollowerPoseToTransform_CS.usf", "Main", SF_Compute);
+
+	class FGIAG_BucketCompactionCS : public FGlobalShader
+	{
+	public:
+		DECLARE_GLOBAL_SHADER(FGIAG_BucketCompactionCS);
+		SHADER_USE_PARAMETER_STRUCT(FGIAG_BucketCompactionCS, FGlobalShader);
+
+		BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+			SHADER_PARAMETER(uint32, NumMoves)
+			SHADER_PARAMETER(uint32, MaxTransformCount)
+			SHADER_PARAMETER(uint32, BaseSpanOffsetBytes)
+			SHADER_PARAMETER(uint32, DispatchGroupCountX)
+			SHADER_PARAMETER(uint32, DispatchGroupCountY)
+			SHADER_PARAMETER(uint32, DispatchGroupOffset)
+			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint2>, SlotMoves)
+			SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<FVector4f>, TransformBuffer)
+			SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<FVector4f>, RW_TransformBuffer)
+		END_SHADER_PARAMETER_STRUCT()
+
+		static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters) { return true; }
+		static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+		{
+			FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		}
+	};
+	IMPLEMENT_GLOBAL_SHADER(FGIAG_BucketCompactionCS, "/GameInstancedAnimationGraphShader/GIAG_BucketCompaction_CS.usf", "Main", SF_Compute);
 
 	class FGIAG_AttachToTransformBufferCS : public FGlobalShader
 	{
@@ -333,7 +357,7 @@ namespace GIAG
 
 		FRDGBufferSRVRef ActiveIndicesSRV = Params.ActiveInstanceIndices;
 
-		if (!Params.TransformBuffer || !Params.InverseRefPoseTRS || !Params.PoseTRS || !ActiveIndicesSRV || !Params.PrevCacheFloat4 || !Params.ShardTransformOffsets)
+		if (!Params.TransformBuffer || !Params.InverseRefPoseTRS || !Params.PoseTRS || !ActiveIndicesSRV)
 		{
 			return;
 		}
@@ -357,18 +381,15 @@ namespace GIAG
 			P->InverseRefPoseTRS = Params.InverseRefPoseTRS;
 			P->PoseTRS = Params.PoseTRS;
 			P->ActiveInstanceIndices = ActiveIndicesSRV;
-			P->ForceInitPrevAllSlots = Params.ForceInitPrevAllSlots;
-			P->InitPrevBySlot = Params.InitPrevBySlot;
 
-			P->SlotsPerShard = Params.SlotsPerShard;
-			P->ShardTransformOffsets = Params.ShardTransformOffsets;
+			P->BaseTransformOffset = Params.BaseTransformOffset;
+			P->BasePreviousTransformOffset = Params.BasePreviousTransformOffset;
+			P->bWritePreviousTransforms = Params.bWritePreviousTransforms;
+			P->MaxTransformCount = Params.MaxTransformCount;
 
-			// ByteAddressBuffer binding uses PF_R32_UINT for SRV/UAV descriptors.
-			P->TransformBuffer = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(Params.TransformBuffer, PF_R32_UINT));
-			P->RW_TransformBuffer = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(Params.TransformBuffer, PF_R32_UINT));
-
-			P->PrevCacheFloat4 = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(Params.PrevCacheFloat4, PF_A32B32G32R32F));
-			P->RW_PrevCacheFloat4 = GraphBuilder.CreateUAV(Params.PrevCacheFloat4, PF_A32B32G32R32F);
+			// UE 5.8 skinning transform buffer is float4-indexed; engine helpers handle the format.
+			P->TransformBuffer = GetCompressedBoneTransformSRV(GraphBuilder, Params.TransformBuffer);
+			P->RW_TransformBuffer = GetCompressedBoneTransformUAV(GraphBuilder, Params.TransformBuffer);
 
 			GraphBuilder.AddPass(
 				RDG_EVENT_NAME("GIAG_PoseToTransformBuffer"),
@@ -437,14 +458,14 @@ namespace GIAG
 
 	void AddFollowerPoseToTransformBufferPasses(FRDGBuilder& GraphBuilder, const FFollowerPoseToTransformBufferPassParams& Params)
 	{
-		check(Params.NumBones > 0 && Params.NumDsts > 0 && Params.SlotsPerShard > 0);
+		check(Params.NumBones > 0 && Params.NumDsts > 0 && Params.NumSlots > 0);
 		check(Params.PoseTRS != nullptr && Params.InverseRefPoseTRS != nullptr);
 		check(Params.DstInfos != nullptr && Params.TransformBuffer != nullptr);
 
 		TShaderMapRef<FGIAG_FollowerPoseToTransformCS> CS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
 		constexpr int32 ThreadsPerGroup = 64;
-		const int64 TotalWorkItems = (int64)Params.NumDsts * (int64)Params.SlotsPerShard * (int64)Params.NumBones;
+		const int64 TotalWorkItems = (int64)Params.NumDsts * (int64)Params.NumSlots * (int64)Params.NumBones;
 		GIAG::RDGDispatchTiling::ForEachChunk(
 			TotalWorkItems,
 			ThreadsPerGroup,
@@ -453,23 +474,62 @@ namespace GIAG
 			auto* P = GraphBuilder.AllocParameters<FGIAG_FollowerPoseToTransformCS::FParameters>();
 			P->NumBones = Params.NumBones;
 			P->SrcNumBones = Params.SrcNumBones;
-			P->SlotsPerShard = Params.SlotsPerShard;
+			P->NumSlots = Params.NumSlots;
 			P->NumDsts = Params.NumDsts;
+			P->MaxTransformCount = Params.MaxTransformCount;
 			P->DispatchGroupCountX = (uint32)GroupCount.X;
 			P->DispatchGroupCountY = (uint32)GroupCount.Y;
 			P->DispatchGroupOffset = (uint32)GroupOffset1D;
-			P->ForceInitPrevAllSlots = Params.ForceInitPrevAllSlots;
 			P->PoseTRS = Params.PoseTRS;
 			P->InverseRefPoseTRS = Params.InverseRefPoseTRS;
 			P->BoneRemap = Params.BoneRemap;
 			P->DstInfos = Params.DstInfos;
-			P->InitPrevBySlot = Params.InitPrevBySlot;
 			P->IsActiveBySlot = Params.IsActiveBySlot;
-			P->TransformBuffer = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(Params.TransformBuffer, PF_R32_UINT));
-			P->RW_TransformBuffer = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(Params.TransformBuffer, PF_R32_UINT));
+			P->TransformBuffer = GetCompressedBoneTransformSRV(GraphBuilder, Params.TransformBuffer);
+			P->RW_TransformBuffer = GetCompressedBoneTransformUAV(GraphBuilder, Params.TransformBuffer);
 
 			GraphBuilder.AddPass(
 				RDG_EVENT_NAME("GIAG_FollowerPoseToTransform [%s %u]", *Params.DebugName.ToString(), Params.NumDsts),
+				P,
+				ERDGPassFlags::Compute,
+				[P, CS, GroupCount](FRHIComputeCommandList& RHICmdList)
+				{
+					FComputeShaderUtils::Dispatch(RHICmdList, CS, *P, GroupCount);
+				});
+		});
+	}
+
+	void AddBucketCompactionPass(FRDGBuilder& GraphBuilder, const FBucketCompactionPassParams& Params)
+	{
+		if (Params.NumMoves == 0 || Params.MaxTransformCount == 0
+			|| Params.SlotMoves == nullptr || Params.TransformBuffer == nullptr)
+		{
+			return;
+		}
+
+		TShaderMapRef<FGIAG_BucketCompactionCS> CS(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+
+		constexpr int32 ThreadsPerGroup = 64;
+		const int64 TransformsPerMove = (int64)Params.MaxTransformCount * 2;
+		const int64 TotalWorkItems = (int64)Params.NumMoves * TransformsPerMove;
+		GIAG::RDGDispatchTiling::ForEachChunk(
+			TotalWorkItems,
+			ThreadsPerGroup,
+			[&](int32 /*ChunkGroups1D*/, int32 GroupOffset1D, const FIntVector& GroupCount)
+		{
+			auto* P = GraphBuilder.AllocParameters<FGIAG_BucketCompactionCS::FParameters>();
+			P->NumMoves            = Params.NumMoves;
+			P->MaxTransformCount   = Params.MaxTransformCount;
+			P->BaseSpanOffsetBytes = Params.BaseSpanOffsetBytes;
+			P->DispatchGroupCountX = (uint32)GroupCount.X;
+			P->DispatchGroupCountY = (uint32)GroupCount.Y;
+			P->DispatchGroupOffset = (uint32)GroupOffset1D;
+			P->SlotMoves           = Params.SlotMoves;
+			P->TransformBuffer     = GetCompressedBoneTransformSRV(GraphBuilder, Params.TransformBuffer);
+			P->RW_TransformBuffer  = GetCompressedBoneTransformUAV(GraphBuilder, Params.TransformBuffer);
+
+			GraphBuilder.AddPass(
+				RDG_EVENT_NAME("GIAG_BucketCompaction (%u moves)", Params.NumMoves),
 				P,
 				ERDGPassFlags::Compute,
 				[P, CS, GroupCount](FRHIComputeCommandList& RHICmdList)

@@ -48,11 +48,6 @@
 			"Name": "GameInstancedAnimationGraphNiagara",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
-		},
-		{
-			"Name": "GameInstancedAnimationGraphAngelscript",
-			"Type": "Runtime",
-			"LoadingPhase": "Default"
 		}
 	],
 	"Plugins": [

@@ -259,7 +259,16 @@ public:
 	FGameInstancedAnimationGraphHandle AddInstanceWithExternalProxyActor(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph, const FTransform& Transform, AActor* CpuProxyActor, FGIAG_TimeSlot TimeSlot = FGIAG_TimeSlot());
 
 	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim")
-	void RemoveInstance(UPARAM(Ref)FGameInstancedAnimationGraphHandle& Handle);
+	void RemoveInstance(UPARAM(Ref)FGameInstancedAnimationGraphHandle& Handle, bool bAllowAutoShrink = true);
+
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim")
+	void ReserveBucketCapacity(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph, int32 Count);
+
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim")
+	void ShrinkBucket(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph);
+
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim")
+	void ShrinkAllBuckets();
 
 	/** Switch this handle between GPU backend (ISKMC) and CPU backend (CpuProxyActor). Master only. */
 	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|CPU")
@@ -493,7 +502,7 @@ private:
 		// Cached stats
 		int32 NumBones = 0;
 
-		// ---- Optional shared resources (GT-built once per graph+ skeleton; reused by all shards) ----
+		// ---- Optional shared resources (GT-built once per graph+skeleton; reused by all buckets in this group) ----
 		int32 MaxOptionalSRVSlot = -1;
 		TArray<TArray<FGIAG_AnimResourceKey>> OptionalSRVKeyByNodeBySlot; // [NodeIndex][Slot] -> ShareKey
 
@@ -502,14 +511,6 @@ private:
 	};
 
 	friend FGIAG_AnimNodeRef;
-
-	/** Thin shard: only holds the UE ISKMC rendering binding imposed by the 127-slot engine limit. */
-	struct FSkinnedShard
-	{
-		UInstancedSkinnedMeshComponent* ISKMC = nullptr;
-		UGIAG_TransformProviderData* TransformProvider = nullptr;
-		int32 NumInstances = 0;
-	};
 
 	struct FMeshBucket
 	{
@@ -523,7 +524,8 @@ private:
 		int32 GroupIndex = INDEX_NONE;
 		double BoundSphereRadius = 0.0;
 
-		TSparseArray<FSkinnedShard> Shards;
+		UInstancedSkinnedMeshComponent* ISKMC = nullptr;
+		UGIAG_TransformProviderData* TransformProvider = nullptr;
 		int32 NumInstances = 0;
 
 		TRefCountPtr<FGIAG_TransformProviderState> SharedState;
@@ -534,6 +536,9 @@ private:
 		// ---- Computation data (bucket-level, indexed by SlotIndex) ----
 		int32 TotalSlotCapacity = 0;
 		bool bStorageInitialized = false;
+
+		bool bGrewThisFrame = false;
+		bool bPendingShrinkEvaluation = false;
 
 		TArray<int32> RecordIndexBySlot;
 		TBitArray<> SlotAlive;
@@ -564,7 +569,7 @@ private:
 		int32 GetTotalSlotCapacity() const { return TotalSlotCapacity; }
 
 		void InitBucketStorage(const FGIAG_AnimGraphCompiledData& CompiledData, TConstArrayView<uint32> InNodeStrideBytes);
-		void GrowCapacity(int32 NewShardCount, const FGIAG_AnimGraphCompiledData& CompiledData, TConstArrayView<uint32> InNodeStrideBytes);
+		void GrowCapacity(int32 NewCapacity, const FGIAG_AnimGraphCompiledData& CompiledData, TConstArrayView<uint32> InNodeStrideBytes);
 		int32 AllocateSlot();
 		void FreeSlot(int32 SlotIndex);
 
@@ -596,16 +601,6 @@ private:
 		{
 			return NodeStorageByNode[NodeIdx].GetData() + (int64)NodeStrideBytes[NodeIdx] * (int64)SlotIndex;
 		}
-
-		static FORCEINLINE int32 ShardIndexOf(int32 SlotIndex)
-		{
-			return SlotIndex / GIAG::DefaultSlotsPerShard;
-		}
-
-		static FORCEINLINE int32 ShardSlotOf(int32 SlotIndex)
-		{
-			return SlotIndex % GIAG::DefaultSlotsPerShard;
-		}
 	};
 	
 	float GetWorldTimeSeconds() const;
@@ -618,12 +613,26 @@ private:
 	FSkeletonAnimCache* GetSkeletonCache(int32 CacheIndex);
 	const FSkeletonAnimCache* GetSkeletonCache(int32 CacheIndex) const { return const_cast<ThisClass*>(this)->GetSkeletonCache(CacheIndex); }
 
-	/** Find or create the ISMC bucket for this mesh+rig. */
+	/** Find or create the master-eval bucket for this mesh+rig. */
 	int32 FindOrCreateBucket(USkeletalMesh* SkeletalMesh, int32 GroupIndex);
 
+	/** Find or create a follower bucket for this mesh+rig, bound to MasterState. The TransformProvider
+	 *  is configured as Follower BEFORE the SceneProxy is created, so the engine sees follower mode
+	 *  on first proxy build (master→follower retargeting after SceneProxy creation does not work). */
+	int32 FindOrCreateFollowerBucket(
+		USkeletalMesh* SkeletalMesh,
+		int32 GroupIndex,
+		const TRefCountPtr<FGIAG_TransformProviderState>& MasterState,
+		int32 DstNumBones,
+		int32 SrcNumBones,
+		const TSharedPtr<const TArray<uint32>>& RemapShared);
+
 	void CleanupBucketIfEmpty(int32 BucketIndex);
-	void CleanupShardIfEmpty(int32 BucketIndex, int32 ShardIndex);
 	void CleanupGroupIfUnused(int32 GroupIndex);
+
+	void GrowMasterBucketAndFollowers(int32 MasterBucketIndex, int32 NewCapacity);
+
+	void CompactAndShrinkMaster(int32 MasterBucketIndex, int32 NewCapacity);
 
 	/** Per graph-group data. */
 	TSparseArray<FGraphGroup> Groups;
@@ -813,13 +822,17 @@ public:
 	/** Per bucket (MeshAsset+Rig). */
 	TSparseArray<FMeshBucket> Buckets;
 
-	/** Map (MeshAsset,Rig) -> bucket index. */
+	/** Map (MeshAsset, Rig, IsFollower) -> bucket index. */
 	struct FBucketKey
 	{
 		USkeletalMesh* SkeletalMesh;
 		int32 GroupIndex = INDEX_NONE;
+		bool bFollower = false;
 		bool operator==(const FBucketKey&) const = default;
-		friend uint32 GetTypeHash(const FBucketKey& Key) { return HashCombine(::GetTypeHash(Key.SkeletalMesh), ::GetTypeHash(Key.GroupIndex)); }
+		friend uint32 GetTypeHash(const FBucketKey& Key)
+		{
+			return HashCombine(HashCombine(::GetTypeHash(Key.SkeletalMesh), ::GetTypeHash(Key.GroupIndex)), ::GetTypeHash(Key.bFollower));
+		}
 	};
 	TMap<FBucketKey, int32> BucketByKey;
 

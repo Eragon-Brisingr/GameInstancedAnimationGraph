@@ -1,14 +1,15 @@
 // compute skin matrix from master PoseBuffer and write directly to TransformBuffer.
 // Eliminates the intermediate SkinCache buffer and the separate Compute+Scatter two-pass overhead.
-// Grid: NumDsts x SlotsPerShard x NumBones (with tiling support)
+// Grid: NumDsts x NumSlots x NumBones (with tiling support)
 
 #include "/Engine/Public/Platform.ush"
 #include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
 
-uint NumBones;            // destination bone count
+uint NumBones;            // destination bone count (skeleton bone count)
 uint SrcNumBones;         // source (master) bone count
-uint SlotsPerShard;
+uint NumSlots;            // master bucket capacity (one ISKMC per bucket since UE 5.8)
 uint NumDsts;
+uint MaxTransformCount;   // engine-side per-animation-slot transform stride (follower bucket)
 
 uint DispatchGroupCountX;
 uint DispatchGroupCountY;
@@ -19,20 +20,14 @@ StructuredBuffer<FGIAG_BoneTRS> InverseRefPoseTRS;  // master InvRefPose
 
 StructuredBuffer<uint> BoneRemap; // size = NumBones (DestBone -> SrcBone)
 
-struct FFollowerDstInfo
-{
-	uint SrcSlotBase;
-	uint DstTransformOffsetBytes;
-};
-StructuredBuffer<FFollowerDstInfo> DstInfos;
-
-StructuredBuffer<uint> InitPrevBySlot;
-uint ForceInitPrevAllSlots;
+// Per-DstIndex destination byte offset into TransformBuffer (Cur or Prev region of the follower's slot span).
+StructuredBuffer<uint> DstInfos;
 
 StructuredBuffer<uint> IsActiveBySlot;
 
-ByteAddressBuffer TransformBuffer;
-RWByteAddressBuffer RW_TransformBuffer;
+// UE 5.8: skinning transform buffer is float4-indexed (PF_A32B32G32R32F), not byte-addressed.
+Buffer<float4> TransformBuffer;
+RWBuffer<float4> RW_TransformBuffer;
 
 [numthreads(64, 1, 1)]
 void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
@@ -40,24 +35,23 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 	uint GroupLinear = DispatchGroupOffset + GroupId.x + GroupId.y * DispatchGroupCountX + GroupId.z * (DispatchGroupCountX * DispatchGroupCountY);
 	uint DispatchId = GroupLinear * 64u + GroupIndex;
 
-	uint Total = NumDsts * SlotsPerShard * NumBones;
+	uint Total = NumDsts * NumSlots * NumBones;
 	if (DispatchId >= Total)
 	{
 		return;
 	}
 
-	uint DstIndex = DispatchId / (SlotsPerShard * NumBones);
-	uint Local = DispatchId - DstIndex * (SlotsPerShard * NumBones);
+	uint DstIndex = DispatchId / (NumSlots * NumBones);
+	uint Local = DispatchId - DstIndex * (NumSlots * NumBones);
 	uint Slot = Local / NumBones;
 	uint DestBone = Local - Slot * NumBones;
 
 	uint SrcBone = BoneRemap[DestBone];
 
-	FFollowerDstInfo DI = DstInfos[DstIndex];
-	uint MasterSlot = DI.SrcSlotBase + Slot;
-	uint DstTransformOffsetBytes = DI.DstTransformOffsetBytes;
+	// One ISKMC per bucket since UE 5.8: master slot index == follower local slot.
+	uint DstTransformOffsetBytes = DstInfos[DstIndex];
 
-	if (IsActiveBySlot[MasterSlot] == 0u)
+	if (IsActiveBySlot[Slot] == 0u)
 	{
 		return;
 	}
@@ -74,31 +68,16 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 	}
 	else
 	{
-		FGIAG_BoneTRS GlobalT = PoseTRS[MasterSlot * SrcNumBones + SrcBone];
+		FGIAG_BoneTRS GlobalT = PoseTRS[Slot * SrcNumBones + SrcBone];
 		FGIAG_BoneTRS InvRef = InverseRefPoseTRS[SrcBone];
 		FGIAG_BoneTRS SkinT = GIAG_MultiplyBoneTRS(InvRef, GlobalT);
 		float3x4 SkinM = GIAG_MatrixFromBoneTRS(SkinT);
 		BoneXform = transpose(SkinM);
 	}
 
-	uint DestBase = (Slot * 2u) * NumBones + DestBone;
-	uint CurIndex = DestBase + 0u * NumBones;
-	uint PrevIndex = DestBase + 1u * NumBones;
-
-	bool bInitPrev =
-		(ForceInitPrevAllSlots != 0u) ||
-		(InitPrevBySlot[Slot] != 0u);
-
-	float4x3 PrevXf;
-	if (bInitPrev)
-	{
-		PrevXf = BoneXform;
-	}
-	else
-	{
-		PrevXf = LoadCompressedBoneTransform(TransformBuffer, DstTransformOffsetBytes, CurIndex);
-	}
-
-	StoreCompressedBoneTransform(RW_TransformBuffer, DstTransformOffsetBytes, PrevIndex, PrevXf);
-	StoreCompressedBoneTransform(RW_TransformBuffer, DstTransformOffsetBytes, CurIndex, BoneXform);
+	// UE layout matches engine SkinningSceneDataDecode formula
+	//   InRegion = SlotIndex * 2 * MaxTransformCount + BoneIndex
+	// DstTransformOffsetBytes already selects Cur or Prev region for this DstIndex.
+	const uint InRegionIndex = (Slot * 2u) * MaxTransformCount + DestBone;
+	GIAG_StoreCompressedBoneTransform(RW_TransformBuffer, DstTransformOffsetBytes, InRegionIndex, BoneXform);
 }

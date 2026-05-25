@@ -1,0 +1,53 @@
+// Slot-level compaction inside a single primitive's TransformBuffer span.
+// Used by shrink: before reducing UniqueAnimationCount, we remap the existing span so the
+// per-slot data at high (>= NewCap) positions is moved to low free positions according to the
+// CPU-built slot move plan. Both Cur and Prev halves are moved together (the engine will copy
+// the contiguous min(OldCount, NewCount) range into the new smaller span on the next pre-update,
+// preserving motion blur after shrink).
+
+#include "/Engine/Public/Platform.ush"
+#include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
+
+// Number of (OldSlot, NewSlot) pairs.
+uint NumMoves;
+// Engine-side per-animation-slot transform stride (= GetMaxBoneTransformCount).
+uint MaxTransformCount;
+// Byte offset of the start of this primitive's TransformBuffer span (slot 0 base for both Cur+Prev halves).
+uint BaseSpanOffsetBytes;
+
+uint DispatchGroupCountX;
+uint DispatchGroupCountY;
+uint DispatchGroupOffset;
+
+// .x = OldSlot, .y = NewSlot. Packed as uint2 to keep the host-side StructuredBuffer<uint2> simple.
+StructuredBuffer<uint2> SlotMoves;
+
+Buffer<float4>   TransformBuffer;
+RWBuffer<float4> RW_TransformBuffer;
+
+[numthreads(64, 1, 1)]
+void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	const uint GroupLinear = DispatchGroupOffset + GroupId.x + GroupId.y * DispatchGroupCountX + GroupId.z * (DispatchGroupCountX * DispatchGroupCountY);
+	const uint DispatchId = GroupLinear * 64u + GroupIndex;
+
+	// Each move owns (2 * MaxTransformCount) consecutive transforms (Cur half + Prev half).
+	const uint TransformsPerMove = 2u * MaxTransformCount;
+	const uint Total = NumMoves * TransformsPerMove;
+	if (DispatchId >= Total)
+	{
+		return;
+	}
+
+	const uint MoveIdx   = DispatchId / TransformsPerMove;
+	const uint InMoveIdx = DispatchId - MoveIdx * TransformsPerMove;
+	const uint2 Move     = SlotMoves[MoveIdx];
+
+	// Memory layout per slot in the span: [Cur stride MaxTC] [Prev stride MaxTC] (interleaved per slot).
+	// Slot S occupies indices [S * 2 * MaxTC, (S+1) * 2 * MaxTC) within the span.
+	const uint SrcRegionIndex = Move.x * TransformsPerMove + InMoveIdx;
+	const uint DstRegionIndex = Move.y * TransformsPerMove + InMoveIdx;
+
+	const float4x3 Data = GIAG_LoadCompressedBoneTransform(TransformBuffer, BaseSpanOffsetBytes, SrcRegionIndex);
+	GIAG_StoreCompressedBoneTransform(RW_TransformBuffer, BaseSpanOffsetBytes, DstRegionIndex, Data);
+}

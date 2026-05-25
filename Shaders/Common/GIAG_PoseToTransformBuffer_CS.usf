@@ -1,4 +1,4 @@
-// Pose(TRS: Component) -> UE SkinningSceneExtension TransformBuffer (RWByteAddressBuffer).
+// Pose(TRS: Component) -> UE SkinningSceneExtension TransformBuffer.
 // - ComponentPose: use Component(TRS) directly as Global(TRS), then *InvRef(TRS), then TRS->matrix.
 
 #include "/Engine/Public/Platform.ush"
@@ -10,24 +10,23 @@ uint DispatchGroupCountX;
 uint DispatchGroupCountY;
 uint DispatchGroupOffset;
 
-// Per-shard TransformBuffer byte offsets. SlotIndex / SlotsPerShard = ShardIdx.
-StructuredBuffer<uint> ShardTransformOffsets;
-uint SlotsPerShard;
+// Base byte offset into TransformBuffer for slot 0's Current region of this bucket.
+uint BaseTransformOffset;
+// Base byte offset into TransformBuffer for slot 0's Previous region (UE 5.8 alternates Cur/Prev per frame).
+uint BasePreviousTransformOffset;
+// 0 = skip Prev write (engine sees last frame's data via the alternation).
+// 1 = write Prev = Current (engine flagged EDirtyBoneTransforms::Previous).
+uint bWritePreviousTransforms;
+// Engine-side per-animation-slot transform stride (=GetMaxBoneTransformCount). May differ from NumBones.
+uint MaxTransformCount;
 
 StructuredBuffer<FGIAG_BoneTRS> InverseRefPoseTRS; // one per bone
 StructuredBuffer<FGIAG_BoneTRS> PoseTRS;      // slot-indexed, one per bone
 StructuredBuffer<uint> ActiveInstanceIndices; // ActiveIndex -> SlotIndex
 
-StructuredBuffer<uint> InitPrevBySlot;
-uint ForceInitPrevAllSlots;
-
 // Source reads (same underlying buffer as RW_TransformBuffer).
-ByteAddressBuffer TransformBuffer;
-RWByteAddressBuffer RW_TransformBuffer;
-
-// RT-only GIAG prev-cache: 3 float4 rows per (SlotIndex,BoneIndex) storing float3x4 current matrix.
-Buffer<float4> PrevCacheFloat4;
-RWBuffer<float4> RW_PrevCacheFloat4;
+Buffer<float4> TransformBuffer;
+RWBuffer<float4> RW_TransformBuffer;
 
 FGIAG_BoneTRS ReadPoseTRS(in uint SlotIndex, in uint BoneIndex)
 {
@@ -62,46 +61,17 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 	FGIAG_BoneTRS SkinT = GIAG_MultiplyBoneTRS(InvRef, GlobalT); // Global ∘ InvRef
 	float3x4 SkinM = GIAG_MatrixFromBoneTRS(SkinT);
 
-	uint ShardIdx = SlotIndex / SlotsPerShard;
-	// Slot -> shard-local mapping.
-	uint LocalSlot = SlotIndex - ShardIdx * SlotsPerShard;
-	uint ResolvedTransformOffset = ShardTransformOffsets[ShardIdx];
-
-	const uint Base = (LocalSlot * 2u) * NumBones + BoneIndex;
 	const float4x3 BoneXform = transpose(SkinM);
 
-	const uint CurIndex = Base + 0u * NumBones;
-	const uint PrevIndex = Base + 1u * NumBones;
+	const uint InRegionIndex = (SlotIndex * 2u) * MaxTransformCount + BoneIndex;
 
-	const bool bInitPrev =
-		(ForceInitPrevAllSlots != 0u) ||
-		(InitPrevBySlot[SlotIndex] != 0u);
+	// Always write Current.
+	GIAG_StoreCompressedBoneTransform(RW_TransformBuffer, BaseTransformOffset, InRegionIndex, BoneXform);
 
-	float4x3 PrevXf;
-	if (bInitPrev)
+	// Write Prev only on engine-flagged init/re-bind frames; otherwise the engine's per-frame
+	// Cur/Prev rotation already places last frame's Cur at BasePreviousTransformOffset (zero work).
+	if (bWritePreviousTransforms != 0u)
 	{
-		PrevXf = BoneXform;
-	}
-	else
-	{
-		// Read previous-current from GIAG prev-cache (float3x4 stored as 3 float4 rows).
-		const uint CacheBase = (SlotIndex * NumBones + BoneIndex) * 3u;
-		const float4 R0 = PrevCacheFloat4[CacheBase + 0u];
-		const float4 R1 = PrevCacheFloat4[CacheBase + 1u];
-		const float4 R2 = PrevCacheFloat4[CacheBase + 2u];
-		const float3x4 PrevSkinM = float3x4(R0, R1, R2);
-		PrevXf = transpose(PrevSkinM);
-	}
-
-	StoreCompressedBoneTransform(RW_TransformBuffer, ResolvedTransformOffset, PrevIndex, PrevXf);
-	StoreCompressedBoneTransform(RW_TransformBuffer, ResolvedTransformOffset, CurIndex, BoneXform);
-
-	// Update prev-cache with this frame's current (store SkinM rows).
-	{
-		const uint CacheBase = (SlotIndex * NumBones + BoneIndex) * 3u;
-		RW_PrevCacheFloat4[CacheBase + 0u] = SkinM[0];
-		RW_PrevCacheFloat4[CacheBase + 1u] = SkinM[1];
-		RW_PrevCacheFloat4[CacheBase + 2u] = SkinM[2];
+		GIAG_StoreCompressedBoneTransform(RW_TransformBuffer, BasePreviousTransformOffset, InRegionIndex, BoneXform);
 	}
 }
-

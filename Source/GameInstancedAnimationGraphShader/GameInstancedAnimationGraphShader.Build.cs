@@ -31,6 +31,8 @@ public class GameInstancedAnimationGraphShader : ModuleRules
 
 		// Needed for FShaderSerializeContext (RenderCore internal header).
 		PrivateIncludePaths.Add(Path.Combine(EngineDirectory, "Source/Runtime/RenderCore/Internal"));
+		// Needed for GetCompressedBoneTransform{SRV,UAV} helpers in Skinning/SkinningTransformProvider.h.
+		PrivateIncludePaths.Add(Path.Combine(EngineDirectory, "Source/Runtime/Renderer/Private"));
 	}
 }
 

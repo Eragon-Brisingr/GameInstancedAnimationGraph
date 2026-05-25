@@ -94,10 +94,13 @@ public:
 		const TCHAR* InFunctionName,
 		uint32 InFrequency,
 		int32 InTotalPermutationCount,
+		int32 InTotalSpecializationCount,
 		ConstructSerializedType InConstructSerializedRef,
 		ConstructCompiledType InConstructCompiledRef,
 		ShouldCompilePermutationType InShouldCompilePermutationRef,
 		ShouldPrecachePermutationType InShouldPrecachePermutationRef,
+		GetUnspecializedIdType InGetUnspecializedIdRef,
+		GetSpecializationValuesType InGetSpecializationValuesRef,
 		GetRayTracingPayloadTypeType InGetRayTracingPayloadTypeRef,
 		GetShaderBindingLayoutType InGetShaderBindingLayoutTypeRef,
 #if WITH_EDITOR

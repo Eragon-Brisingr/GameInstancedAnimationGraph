@@ -26,6 +26,24 @@ namespace
 			return GraphBuilder.RegisterExternalBuffer(External, Name);
 		}
 		FRDGBufferRef NewBuf = GraphBuilder.CreateBuffer(Desc, Name);
+
+		// Preserve per-slot persistent state across grow: when stride is unchanged we copy the
+		// old prefix into the new (larger or smaller) buffer. Without this, slot-indexed buffers
+		// such as ComponentToWorldBySlot/WorldToComponentBySlot/NodeParams retain garbage for any
+		// slot whose owner did not happen to produce a dirty upload this frame, corrupting GPU
+		// pose evaluation for stable instances after a bucket grow.
+		if (External.IsValid() && External->Desc.BytesPerElement == Desc.BytesPerElement)
+		{
+			const uint64 OldNumBytes = (uint64)External->Desc.BytesPerElement * (uint64)External->Desc.NumElements;
+			const uint64 NewNumBytes = (uint64)Desc.BytesPerElement * (uint64)Desc.NumElements;
+			const uint64 CopyBytes = FMath::Min(OldNumBytes, NewNumBytes);
+			if (CopyBytes > 0)
+			{
+				FRDGBufferRef OldBuf = GraphBuilder.RegisterExternalBuffer(External, TEXT("GIAG_AG_PrevBuffer"));
+				AddCopyBufferPass(GraphBuilder, NewBuf, 0, OldBuf, 0, CopyBytes);
+			}
+		}
+
 		External = GraphBuilder.ConvertToExternalBuffer(NewBuf);
 		return NewBuf;
 	}
@@ -238,16 +256,6 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 	FRDGBufferRef ClipRDG = GraphBuilder.RegisterExternalBuffer(AnimLibraryBuffers.ClipMetas, TEXT("GIAG_AG_ClipMetas_External"));
 	FRDGBufferRef AnimRDG = GraphBuilder.RegisterExternalBuffer(AnimLibraryBuffers.AnimTRS, TEXT("GIAG_AG_AnimTRS_External"));
 	FRDGBufferRef RefPoseRDG = GraphBuilder.RegisterExternalBuffer(AnimLibraryBuffers.RefPoseLocalTRS, TEXT("GIAG_AG_RefPoseLocalTRS_External"));
-
-	// Ensure PrevCache buffer for motion blur (3 float4 rows per bone).
-	const uint32 PrevCacheElements = 3u * (uint32)Params.SlotCapacity * (uint32)Params.NumBones;
-	const FRDGBufferDesc PrevCacheDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(FVector4f), FMath::Max(1u, PrevCacheElements));
-	const bool bPrevCacheRecreated = !(Resources.PrevCacheFloat4.IsValid() && Resources.PrevCacheFloat4->Desc == PrevCacheDesc);
-	FRDGBufferRef PrevCacheRDG = CreateOrRegisterExternalBuffer(
-		GraphBuilder,
-		Resources.PrevCacheFloat4,
-		PrevCacheDesc,
-		TEXT("GIAG_AG_PrevCacheFloat4"));
 
 	// Ensure pose output buffers.
 	TArray<FRDGBufferSRVRef> PoseSRVs;
@@ -703,46 +711,11 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 			TBParams.InverseRefPoseTRS = InvSRV;
 			TBParams.PoseTRS = PoseSRVs[FinalPoseRes];
 			TBParams.TransformBuffer = Params.OutputTransformBuffer;
-			TBParams.PrevCacheFloat4 = PrevCacheRDG;
-			TBParams.ForceInitPrevAllSlots = bPrevCacheRecreated ? 1u : 0u;
 
-			{
-				const uint32 SC = (uint32)Params.SlotCapacity;
-				const bool bHasPerSlotData = Params.TransformUpload && Params.TransformUpload->InitPrevBySlot.Num() == Params.SlotCapacity;
-				if (bHasPerSlotData)
-				{
-					FRDGBufferRef InitPrevRDG = CreateStructuredBuffer(
-						GraphBuilder,
-						TEXT("GIAG_InitPrevBySlot"),
-						sizeof(uint32),
-						SC,
-						Params.TransformUpload->InitPrevBySlot.GetData(),
-						(uint64)sizeof(uint32) * (uint64)SC);
-					TBParams.InitPrevBySlot = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(InitPrevRDG, PF_R32_UINT));
-				}
-				else
-				{
-					FRDGBufferRef ZeroRDG = GraphBuilder.CreateBuffer(
-						FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), FMath::Max(1u, SC)),
-						TEXT("GIAG_InitPrevBySlotZero"));
-					AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ZeroRDG), 0u);
-					TBParams.InitPrevBySlot = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(ZeroRDG, PF_R32_UINT));
-				}
-			}
-
-			TBParams.SlotsPerShard = (uint32)Params.SlotsPerShard;
-			checkf(Params.ShardTransformOffsets.Num() > 0, TEXT("GIAG: ShardTransformOffsets must be set."));
-			{
-				const uint32 NumShards = (uint32)Params.ShardTransformOffsets.Num();
-				FRDGBufferRef ShardOffBuf = CreateStructuredBuffer(
-					GraphBuilder,
-					TEXT("GIAG_ShardTransformOffsets"),
-					sizeof(uint32),
-					NumShards,
-					Params.ShardTransformOffsets.GetData(),
-					(uint64)sizeof(uint32) * (uint64)NumShards);
-				TBParams.ShardTransformOffsets = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(ShardOffBuf, PF_R32_UINT));
-			}
+			TBParams.BaseTransformOffset = Params.BaseTransformOffset;
+			TBParams.BasePreviousTransformOffset = Params.BasePreviousTransformOffset;
+			TBParams.bWritePreviousTransforms = Params.bWritePreviousTransforms ? 1u : 0u;
+			TBParams.MaxTransformCount = Params.MaxTransformCount;
 
 			GIAG::AddPoseToTransformBufferPasses(GraphBuilder, TBParams);
 		}

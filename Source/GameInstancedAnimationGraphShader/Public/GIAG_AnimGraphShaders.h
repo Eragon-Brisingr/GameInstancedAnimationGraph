@@ -10,12 +10,6 @@ class UTextureRenderTarget2DArray;
 
 namespace GIAG
 {
-	/**
-	 * Mirrors `GIAG::DefaultSlotsPerShard` in `GIAG_AnimCommon.h` (shader module cannot include that header).
-	 * Distinct identifier so TUs that include both headers do not redefine `DefaultSlotsPerShard`.
-	 */
-	static constexpr uint32 AnimGraphShaderDefaultSlotsPerShard = 127;
-
 	struct FPoseToSkinPassParams
 	{
 		uint32 NumBones = 0;
@@ -50,18 +44,20 @@ namespace GIAG
 		/** UE SkinningSceneExtension TransformBuffer (ByteAddress). */
 		FRDGBufferRef TransformBuffer = nullptr;
 
-		/** GIAG RT-only previous cache (RWBuffer<float4>): 3 float4 rows per (SlotIndex,BoneIndex). */
-		FRDGBufferRef PrevCacheFloat4 = nullptr;
-
-		/** If non-zero, force previous=current for all slots this frame (e.g. prev-cache newly created/resized). */
-		uint32 ForceInitPrevAllSlots = 0;
-
-		FRDGBufferSRVRef InitPrevBySlot = nullptr; // StructuredBuffer<uint>, size = SlotCapacity
-
-		/** Per-shard TransformBuffer byte offsets. Each shard writes to its own TransformBuffer region.
-		 *  SlotIndex % SlotsPerShard = ShardSlot, SlotIndex / SlotsPerShard = ShardIndex. */
-		FRDGBufferSRVRef ShardTransformOffsets = nullptr; // StructuredBuffer<uint>, size = NumShards (required)
-		uint32 SlotsPerShard = AnimGraphShaderDefaultSlotsPerShard;
+		/** Base byte offset into TransformBuffer for slot 0 Current region of this bucket
+		 *  (= Indirection.CurrentTransformOffset). */
+		uint32 BaseTransformOffset = 0;
+		/** Base byte offset into TransformBuffer for slot 0 Previous region of this bucket
+		 *  (= Indirection.PreviousTransformOffset). UE 5.8 alternates Cur/Prev regions per frame —
+		 *  last frame's Cur write is sitting at this offset, so we only write here when the engine
+		 *  flags `EDirtyBoneTransforms::Previous` (first frame / re-bind). */
+		uint32 BasePreviousTransformOffset = 0;
+		/** When non-zero the master shader writes the Previous region as well (Prev = Current). Set
+		 *  this when the engine signals `EDirtyBoneTransforms::Previous` for this indirection. */
+		uint32 bWritePreviousTransforms = 0;
+		/** Engine-side per-animation-slot transform stride (= FSkinningSceneExtensionProxy::GetMaxBoneTransformCount()).
+		 *  May differ from NumBones (raw vs total bones, BoneMap mode, etc.). Used as engine-output stride only. */
+		uint32 MaxTransformCount = 0;
 	};
 
 	GAMEINSTANCEDANIMATIONGRAPHSHADER_API void AddPoseToTransformBufferPasses(FRDGBuilder& GraphBuilder, const FPoseToTransformBufferPassParams& Params);
@@ -81,25 +77,21 @@ namespace GIAG
 	};
 	GAMEINSTANCEDANIMATIONGRAPHSHADER_API void AddPoseSpaceConvertPasses(FRDGBuilder& GraphBuilder, const FPoseSpaceConvertPassParams& Params);
 
-	struct FFollowerDstInfo
-	{
-		uint32 SrcSlotBase = 0;
-		uint32 DstTransformOffsetBytes = 0;
-	};
-
 	struct FFollowerPoseToTransformBufferPassParams
 	{
 		uint32 NumBones = 0;
 		uint32 SrcNumBones = 0;
-		uint32 SlotsPerShard = AnimGraphShaderDefaultSlotsPerShard;
+		uint32 NumSlots = 0; // master bucket capacity (one ISKMC per bucket since UE 5.8)
 		uint32 NumDsts = 0;
+		/** Engine-side per-animation-slot transform stride for the FOLLOWER bucket
+		 *  (= FollowerProxy->GetMaxBoneTransformCount()). May differ from NumBones. */
+		uint32 MaxTransformCount = 0;
 
 		FRDGBufferSRVRef PoseTRS = nullptr;
 		FRDGBufferSRVRef InverseRefPoseTRS = nullptr;
+		/** Per-DstIndex destination byte offset into TransformBuffer (Cur or Prev region). */
 		FRDGBufferSRVRef DstInfos = nullptr;
 		FRDGBufferSRVRef BoneRemap = nullptr;          // DestBone -> SrcBone (identity when no remap)
-		FRDGBufferSRVRef InitPrevBySlot = nullptr;
-		uint32 ForceInitPrevAllSlots = 0;
 		FRDGBufferSRVRef IsActiveBySlot = nullptr;     // per-slot activity from master frustum cull
 
 		FRDGBufferRef TransformBuffer = nullptr;
@@ -108,6 +100,23 @@ namespace GIAG
 	};
 
 	GAMEINSTANCEDANIMATIONGRAPHSHADER_API void AddFollowerPoseToTransformBufferPasses(FRDGBuilder& GraphBuilder, const FFollowerPoseToTransformBufferPassParams& Params);
+
+	/**
+	 * Slot-level compaction within a single primitive's TransformBuffer span. Used by shrink to
+	 * remap (OldSlot -> NewSlot) data BEFORE reducing UniqueAnimationCount, so the engine's own
+	 * span-truncate-and-copy preserves both Cur and Prev for the kept slots — keeping motion blur
+	 * correct across shrink. Each move copies the full per-slot block (2 * MaxTransformCount).
+	 */
+	struct FBucketCompactionPassParams
+	{
+		uint32 NumMoves = 0;
+		uint32 MaxTransformCount = 0;
+		uint32 BaseSpanOffsetBytes = 0;
+		FRDGBufferSRVRef SlotMoves = nullptr;          // StructuredBuffer<FSlotMove { uint Old; uint New; }>
+		FRDGBufferRef    TransformBuffer = nullptr;    // engine TransformDataBuffer
+	};
+
+	GAMEINSTANCEDANIMATIONGRAPHSHADER_API void AddBucketCompactionPass(FRDGBuilder& GraphBuilder, const FBucketCompactionPassParams& Params);
 
 	struct FAttachToTransformBufferPassParams
 	{

@@ -13,7 +13,7 @@ class FEvent;
 
 /**
  * Incremental AnimLibrary upload blob.
- * Built on GT, consumed on RT; safe to share across many shard payloads via TSharedPtr.
+ * Built on GT, consumed on RT; safe to share across many bucket payloads via TSharedPtr.
  */
 struct FGIAG_AnimLibraryClipMetaUpdate
 {
@@ -72,11 +72,11 @@ struct FGIAG_AnimLibraryUploadData
 using FGIAG_AnimLibraryUploadDataPtr = TSharedPtr<const FGIAG_AnimLibraryUploadData>;
 
 /**
- * Incremental per-shard transform upload blob.
+ * Incremental per-bucket transform upload blob.
  * Built on GT, consumed on RT.
  *
  * Contract:
- * - SlotCapacity matches Params.SlotCapacity for the shard evaluation.
+ * - SlotCapacity matches Params.SlotCapacity for the bucket evaluation.
  * - DirtySlots and DirtyComponentToWorld are 1:1 aligned.
  * - DirtySlots contains unique slot indices (no duplicates).
  */
@@ -86,13 +86,6 @@ struct FGIAG_TransformUploadData
 	TArray<uint32> DirtySlots;
 	/** Per-slot ComponentToWorld transforms (slot-indexed, only for DirtySlots). */
 	TArray<FTransform3f> DirtyComponentToWorld;
-
-	/**
-	 * Optional per-slot init flag (size SlotCapacity):
-	 * - InitPrevBySlot[SlotIndex] != 0 indicates this SlotIndex is newly created this frame, so we should set previous=current
-	 *   (avoid first-frame velocity spikes from uninitialized old current).
-	 */
-	TArray<uint32> InitPrevBySlot;
 };
 using FGIAG_TransformUploadDataPtr = TSharedPtr<const FGIAG_TransformUploadData>;
 
@@ -184,13 +177,6 @@ struct FGIAG_AnimGraphPersistentResources
 	uint32 NeedNodeWordsPerSlot = 0;
 	uint32 NeedNodeBitsNumNodes = 0;
 	uint32 NeedNodeBitsSlotCapacity = 0;
-
-	/**
-	 * RT-only: prev-cache for TransformBuffer motion blur.
-	 * Layout: RWBuffer<float4>, 3 float4 rows per (SlotIndex, BoneIndex) storing a float3x4 current matrix.
-	 * Index = (SlotIndex * NumBones + BoneIndex) * 3 + Row (0..2).
-	 */
-	TRefCountPtr<FRDGPooledBuffer> PrevCacheFloat4;
 };
 
 /** Debug: request GPU->CPU readback of Final LocalPose for one slot (slot-indexed). */
@@ -254,13 +240,21 @@ struct FGIAG_AnimGraphRunParams
 	/** Optional: output directly into UE SkinningSceneExtension TransformBuffer (RDG buffer). */
 	FRDGBufferRef OutputTransformBuffer = nullptr;
 
-	/** Shard layout for unified computation (multiple shards share one runner). */
-	static constexpr int32 SlotsPerShard = GIAG::DefaultSlotsPerShard;
-	int32 NumShards = 1;
-
-	/** Per-shard TransformBuffer byte offsets (built on RT from indirections). Size == NumShards.
-	 *  When set, PoseToTransformBuffer scatters to multiple regions. */
-	TArray<uint32> ShardTransformOffsets;
+	/** Base byte offset into OutputTransformBuffer for slot 0's Current region of this bucket
+	 *  (built on RT from `Indirection.CurrentTransformOffset`). */
+	uint32 BaseTransformOffset = 0;
+	/** Base byte offset into OutputTransformBuffer for slot 0's Previous region of this bucket
+	 *  (built on RT from `Indirection.PreviousTransformOffset`). Only consumed by the master shader
+	 *  when `bWritePreviousTransforms` is true. */
+	uint32 BasePreviousTransformOffset = 0;
+	/** True when the engine signaled `EDirtyBoneTransforms::Previous` for this frame (first frame
+	 *  after re-bind / cap change / mode switch). When false, the engine's previous-region already
+	 *  holds last frame's writes via the per-frame Cur/Prev slot rotation, so the master shader
+	 *  skips the Prev write entirely (saves 3 UAV stores per bone per slot). */
+	bool bWritePreviousTransforms = false;
+	/** Engine-side per-animation-slot transform stride
+	 *  (= FSkinningSceneExtensionProxy::GetMaxBoneTransformCount()). May differ from NumBones. */
+	uint32 MaxTransformCount = 0;
 };
 
 /**

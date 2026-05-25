@@ -210,7 +210,7 @@ public:
 	virtual FGIAG_AnimGraphInstanceRef GetDefaultGraphInstance() const { return ReceiveGetDefaultGraphInstance(); }
 
 	/** Compile and cache compiled data. Safe to call multiple times. */
-	const FGIAG_AnimGraphCompiledData& Compile();
+	const FGIAG_AnimGraphCompiledData& Compile(bool bForce = false);
 
 	const FGIAG_AnimGraphCompiledData& GetCompiledData() const { return Compiled; }
 

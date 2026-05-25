@@ -259,13 +259,7 @@ FGameInstancedAnimationAttachHandle UGameInstancedAnimationGraphSubsystem::Attac
 		return {};
 	}
 	const FMeshBucket& Bucket = Buckets[Rec->BucketIndex];
-	const int32 ShardIndex = FMeshBucket::ShardIndexOf(Rec->SlotIndex);
-	if (!Bucket.Shards.IsValidIndex(ShardIndex))
-	{
-		return {};
-	}
-	const FSkinnedShard& Shard = Bucket.Shards[ShardIndex];
-	if (!Shard.TransformProvider || !Shard.TransformProvider->GetState().IsValid())
+	if (!Bucket.TransformProvider || !Bucket.TransformProvider->GetState().IsValid())
 	{
 		return {};
 	}
