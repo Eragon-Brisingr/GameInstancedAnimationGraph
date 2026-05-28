@@ -1,13 +1,14 @@
 // compute skin matrix from master PoseBuffer and write directly to TransformBuffer.
 // Eliminates the intermediate SkinCache buffer and the separate Compute+Scatter two-pass overhead.
-// Grid: NumDsts x NumSlots x NumBones (with tiling support)
+// Grid: NumDsts x NumActive x NumBones (compact dispatch over active instances; the ActiveIndex
+// -> SlotIndex mapping is shared with the master pass).
 
 #include "/Engine/Public/Platform.ush"
 #include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
 
 uint NumBones;            // destination bone count (skeleton bone count)
 uint SrcNumBones;         // source (master) bone count
-uint NumSlots;            // master bucket capacity (one ISKMC per bucket since UE 5.8)
+uint NumActive;           // master active instance count
 uint NumDsts;
 uint MaxTransformCount;   // engine-side per-animation-slot transform stride (follower bucket)
 
@@ -23,7 +24,8 @@ StructuredBuffer<uint> BoneRemap; // size = NumBones (DestBone -> SrcBone)
 // Per-DstIndex destination byte offset into TransformBuffer (Cur or Prev region of the follower's slot span).
 StructuredBuffer<uint> DstInfos;
 
-StructuredBuffer<uint> IsActiveBySlot;
+// Master-side ActiveIndex -> SlotIndex mapping (same buffer fed to the master pass).
+StructuredBuffer<uint> ActiveInstanceIndices;
 
 // UE 5.8: skinning transform buffer is float4-indexed (PF_A32B32G32R32F), not byte-addressed.
 Buffer<float4> TransformBuffer;
@@ -35,26 +37,23 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 	uint GroupLinear = DispatchGroupOffset + GroupId.x + GroupId.y * DispatchGroupCountX + GroupId.z * (DispatchGroupCountX * DispatchGroupCountY);
 	uint DispatchId = GroupLinear * 64u + GroupIndex;
 
-	uint Total = NumDsts * NumSlots * NumBones;
+	uint Total = NumDsts * NumActive * NumBones;
 	if (DispatchId >= Total)
 	{
 		return;
 	}
 
-	uint DstIndex = DispatchId / (NumSlots * NumBones);
-	uint Local = DispatchId - DstIndex * (NumSlots * NumBones);
-	uint Slot = Local / NumBones;
-	uint DestBone = Local - Slot * NumBones;
+	uint DstIndex = DispatchId / (NumActive * NumBones);
+	uint Local = DispatchId - DstIndex * (NumActive * NumBones);
+	uint ActiveIdx = Local / NumBones;
+	uint DestBone = Local - ActiveIdx * NumBones;
+
+	uint Slot = ActiveInstanceIndices[ActiveIdx];
 
 	uint SrcBone = BoneRemap[DestBone];
 
 	// One ISKMC per bucket since UE 5.8: master slot index == follower local slot.
 	uint DstTransformOffsetBytes = DstInfos[DstIndex];
-
-	if (IsActiveBySlot[Slot] == 0u)
-	{
-		return;
-	}
 
 	float4x3 BoneXform;
 	bool bValidSrc = (SrcBone != 0xFFFFFFFFu) && (SrcBone < SrcNumBones);

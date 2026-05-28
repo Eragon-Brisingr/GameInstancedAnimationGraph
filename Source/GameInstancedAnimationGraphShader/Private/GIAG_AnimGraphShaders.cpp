@@ -95,7 +95,7 @@ namespace
 		BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 			SHADER_PARAMETER(uint32, NumBones)
 			SHADER_PARAMETER(uint32, SrcNumBones)
-			SHADER_PARAMETER(uint32, NumSlots)
+			SHADER_PARAMETER(uint32, NumActive)
 			SHADER_PARAMETER(uint32, NumDsts)
 			SHADER_PARAMETER(uint32, MaxTransformCount)
 			SHADER_PARAMETER(uint32, DispatchGroupCountX)
@@ -105,7 +105,7 @@ namespace
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_BoneTRS>, InverseRefPoseTRS)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, BoneRemap)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, DstInfos)
-			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, IsActiveBySlot)
+			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, ActiveInstanceIndices)
 			SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<FVector4f>, TransformBuffer)
 			SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<FVector4f>, RW_TransformBuffer)
 		END_SHADER_PARAMETER_STRUCT()
@@ -458,14 +458,20 @@ namespace GIAG
 
 	void AddFollowerPoseToTransformBufferPasses(FRDGBuilder& GraphBuilder, const FFollowerPoseToTransformBufferPassParams& Params)
 	{
-		check(Params.NumBones > 0 && Params.NumDsts > 0 && Params.NumSlots > 0);
+		check(Params.NumBones > 0 && Params.NumDsts > 0);
 		check(Params.PoseTRS != nullptr && Params.InverseRefPoseTRS != nullptr);
 		check(Params.DstInfos != nullptr && Params.TransformBuffer != nullptr);
+		check(Params.ActiveInstanceIndices != nullptr);
+
+		if (Params.NumActive == 0)
+		{
+			return;
+		}
 
 		TShaderMapRef<FGIAG_FollowerPoseToTransformCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 
 		constexpr int32 ThreadsPerGroup = 64;
-		const int64 TotalWorkItems = (int64)Params.NumDsts * (int64)Params.NumSlots * (int64)Params.NumBones;
+		const int64 TotalWorkItems = (int64)Params.NumDsts * (int64)Params.NumActive * (int64)Params.NumBones;
 		GIAG::RDGDispatchTiling::ForEachChunk(
 			TotalWorkItems,
 			ThreadsPerGroup,
@@ -474,7 +480,7 @@ namespace GIAG
 			auto* ShaderParams = GraphBuilder.AllocParameters<FGIAG_FollowerPoseToTransformCS::FParameters>();
 			ShaderParams->NumBones = Params.NumBones;
 			ShaderParams->SrcNumBones = Params.SrcNumBones;
-			ShaderParams->NumSlots = Params.NumSlots;
+			ShaderParams->NumActive = Params.NumActive;
 			ShaderParams->NumDsts = Params.NumDsts;
 			ShaderParams->MaxTransformCount = Params.MaxTransformCount;
 			ShaderParams->DispatchGroupCountX = (uint32)GroupCount.X;
@@ -484,7 +490,7 @@ namespace GIAG
 			ShaderParams->InverseRefPoseTRS = Params.InverseRefPoseTRS;
 			ShaderParams->BoneRemap = Params.BoneRemap;
 			ShaderParams->DstInfos = Params.DstInfos;
-			ShaderParams->IsActiveBySlot = Params.IsActiveBySlot;
+			ShaderParams->ActiveInstanceIndices = Params.ActiveInstanceIndices;
 			ShaderParams->TransformBuffer = GetCompressedBoneTransformSRV(GraphBuilder, Params.TransformBuffer);
 			ShaderParams->RW_TransformBuffer = GetCompressedBoneTransformUAV(GraphBuilder, Params.TransformBuffer);
 

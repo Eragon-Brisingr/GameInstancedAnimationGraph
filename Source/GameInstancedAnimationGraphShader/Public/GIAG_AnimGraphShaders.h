@@ -81,7 +81,9 @@ namespace GIAG
 	{
 		uint32 NumBones = 0;
 		uint32 SrcNumBones = 0;
-		uint32 NumSlots = 0; // master bucket capacity (one ISKMC per bucket since UE 5.8)
+		/** Number of master active instances. Dispatch is compact over [0, NumActive) and uses
+		 *  ActiveInstanceIndices to look up the actual SlotIndex (shared with the master pass). */
+		uint32 NumActive = 0;
 		uint32 NumDsts = 0;
 		/** Engine-side per-animation-slot transform stride for the FOLLOWER bucket
 		 *  (= FollowerProxy->GetMaxBoneTransformCount()). May differ from NumBones. */
@@ -91,8 +93,8 @@ namespace GIAG
 		FRDGBufferSRVRef InverseRefPoseTRS = nullptr;
 		/** Per-DstIndex destination byte offset into TransformBuffer (Cur or Prev region). */
 		FRDGBufferSRVRef DstInfos = nullptr;
-		FRDGBufferSRVRef BoneRemap = nullptr;          // DestBone -> SrcBone (identity when no remap)
-		FRDGBufferSRVRef IsActiveBySlot = nullptr;     // per-slot activity from master frustum cull
+		FRDGBufferSRVRef BoneRemap = nullptr;            // DestBone -> SrcBone (identity when no remap)
+		FRDGBufferSRVRef ActiveInstanceIndices = nullptr; // master ActiveIndex -> SlotIndex
 
 		FRDGBufferRef TransformBuffer = nullptr;
 

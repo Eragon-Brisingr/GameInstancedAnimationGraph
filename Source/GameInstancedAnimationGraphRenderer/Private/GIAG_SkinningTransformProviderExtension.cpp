@@ -1226,22 +1226,7 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 		if (Outputs.FinalPoseBuffer != nullptr && Outputs.InverseRefPoseSRV != nullptr)
 		{
 			FRDGBufferSRVRef FinalPoseSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(Outputs.FinalPoseBuffer));
-			const uint32 NumSlots = (uint32)LastParams.SlotCapacity;
-
-			FRDGBufferSRVRef IsActiveBySlotSRV;
-			{
-				const uint32 SC = FMath::Max(1u, (uint32)LastParams.SlotCapacity);
-				TArray<uint32> IsActive;
-				IsActive.SetNumZeroed(SC);
-				for (const uint32 SlotIdx : LastParams.ActiveInstanceIndices)
-				{
-					IsActive[SlotIdx] = 1u;
-				}
-				FRDGBufferRef IsActiveRDG = CreateStructuredBuffer(
-					Context.GraphBuilder, TEXT("GIAG_FollowerIsActiveBySlot"),
-					sizeof(uint32), SC, IsActive.GetData(), (uint64)sizeof(uint32) * (uint64)SC);
-				IsActiveBySlotSRV = Context.GraphBuilder.CreateSRV(FRDGBufferSRVDesc(IsActiveRDG));
-			}
+			const uint32 NumActive = (uint32)LastParams.NumInstances;
 
 			for (auto& FollowerEntry : FollowerGroups_RT)
 			{
@@ -1299,14 +1284,14 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 				GIAG::FFollowerPoseToTransformBufferPassParams FollowParams;
 				FollowParams.NumBones = FollowGroup.NumBones;
 				FollowParams.SrcNumBones = FollowGroup.SrcNumBones;
-				FollowParams.NumSlots = NumSlots;
+				FollowParams.NumActive = NumActive;
 				FollowParams.NumDsts = NumDsts;
 				FollowParams.MaxTransformCount = FollowGroup.MaxTransformCount;
 				FollowParams.PoseTRS = FinalPoseSRV;
 				FollowParams.InverseRefPoseTRS = Outputs.InverseRefPoseSRV;
 				FollowParams.DstInfos = DstInfoSRV;
 				FollowParams.BoneRemap = BoneRemapSRV;
-				FollowParams.IsActiveBySlot = IsActiveBySlotSRV;
+				FollowParams.ActiveInstanceIndices = Outputs.ActiveInstanceIndicesSRV;
 				FollowParams.TransformBuffer = Context.TransformBuffer;
 				FollowParams.DebugName = FollowKey.FollowMeshName;
 				GIAG::AddFollowerPoseToTransformBufferPasses(Context.GraphBuilder, FollowParams);
