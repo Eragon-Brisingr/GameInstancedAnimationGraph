@@ -1,4 +1,4 @@
-﻿{
+{
 	"FileVersion": 3,
 	"Version": 1,
 	"VersionName": "1.0",
@@ -46,6 +46,11 @@
 		},
 		{
 			"Name": "GameInstancedAnimationGraphNiagara",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "GameInstancedAnimationGraphMaterial",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
 		}
