@@ -27,6 +27,7 @@
 #include "Components/SceneComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "MaterialCachedData.h"
 #include "Engine/GameViewportClient.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/SkeletalMesh.h"
@@ -118,14 +119,33 @@ struct UGameInstancedAnimationGraphSubsystem::FPrivateUtils
 		check(ISKMC);
 
 		float AnimationMinScreenSize = 0.0001f;
+		int32 ConfiguredCustomDataFloats = -1;
 		if (auto UserData = SkeletalMesh.GetAssetUserData<UGIAG_SkeletalMeshUserData>())
 		{
 			AnimationMinScreenSize = UserData->AnimationMinScreenSize;
+			ConfiguredCustomDataFloats = UserData->NumCustomDataFloats;
 		}
+
+		int32 NumCustomDataFloats = 0;
+		if (ConfiguredCustomDataFloats >= 0)
+		{
+			NumCustomDataFloats = FMath::Clamp(ConfiguredCustomDataFloats, 0, (int32)FCustomPrimitiveData::NumCustomPrimitiveDataFloats);
+		}
+		else
+		{
+			NumCustomDataFloats = UGameInstancedAnimationGraphSubsystem::DetectNumCustomDataFloatsFromMaterials(SkeletalMesh);
+		}
+		InBucket.NumCustomDataFloats = NumCustomDataFloats;
+
 		ISKMC->SetAnimationMinScreenSize(AnimationMinScreenSize);
 		ISKMC->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		ISKMC->bNavigationRelevant = false;
 		ISKMC->CreationMethod = EComponentCreationMethod::Instance;
+
+		if (NumCustomDataFloats > 0)
+		{
+			ISKMC->SetNumCustomDataFloats(NumCustomDataFloats);
+		}
 
 		ISKMC->RegisterComponent();
 		ISKMC->SetSkinnedAssetAndUpdate(&SkeletalMesh);
@@ -745,6 +765,94 @@ void UGameInstancedAnimationGraphSubsystem::EnsureHostActor()
 	A->SetCanBeDamaged(false);
 
 	HostActor = A;
+}
+
+int32 UGameInstancedAnimationGraphSubsystem::DetectNumCustomDataFloatsFromMaterials(const USkeletalMesh& SkeletalMesh)
+{
+	int32 MaxFloatsNeeded = 0;
+
+	const TArray<FSkeletalMaterial>& Materials = SkeletalMesh.GetMaterials();
+	for (const FSkeletalMaterial& MatSlot : Materials)
+	{
+		UMaterialInterface* MatInterface = MatSlot.MaterialInterface;
+		if (!MatInterface)
+		{
+			continue;
+		}
+		const FMaterialCachedExpressionData& CachedData = MatInterface->GetCachedExpressionData();
+
+		for (const int32 Idx : CachedData.ScalarPrimitiveDataIndexValues)
+		{
+			if (Idx != INDEX_NONE)
+			{
+				MaxFloatsNeeded = FMath::Max(MaxFloatsNeeded, Idx + 1);
+			}
+		}
+
+		for (const int32 Idx : CachedData.VectorPrimitiveDataIndexValues)
+		{
+			if (Idx != INDEX_NONE)
+			{
+				MaxFloatsNeeded = FMath::Max(MaxFloatsNeeded, Idx + 4);
+			}
+		}
+	}
+
+	return FMath::Clamp(MaxFloatsNeeded, 0, (int32)FCustomPrimitiveData::NumCustomPrimitiveDataFloats);
+}
+
+
+void UGameInstancedAnimationGraphSubsystem::SetInstanceCustomDataRange(const FGameInstancedAnimationGraphHandle& Handle, int32 StartIndex, TConstArrayView<float> Values)
+{
+	check(IsInGameThread());
+	FInstancedAnimRecord* Rec = ResolveRecord(Handle);
+	if (!Rec)
+	{
+		return;
+	}
+	if (!ensure(StartIndex >= 0 && StartIndex + Values.Num() <= Rec->MaterialCustomData.Num()))
+	{
+		return;
+	}
+
+	FMemory::Memcpy(&Rec->MaterialCustomData[StartIndex], Values.GetData(), Values.Num() * sizeof(float));
+
+	const int32 Count = Values.Num();
+	if (Rec->ISKMC)
+	{
+		for (int32 Idx = 0; Idx < Count; ++Idx)
+		{
+			Rec->ISKMC->SetCustomDataValue(Rec->InstanceId, StartIndex + Idx, Values[Idx]);
+		}
+	}
+	else if (Rec->CpuProxyActor)
+	{
+		USkeletalMeshComponent* Skinned = IGIAG_ActorInterface::Execute_GetInstancedAnimationSkinnedMesh(Rec->CpuProxyActor);
+		check(Skinned);
+		for (int32 Idx = 0; Idx < Count; ++Idx)
+		{
+			Skinned->SetCustomPrimitiveDataFloat(StartIndex + Idx, Values[Idx]);
+		}
+	}
+	else if (Rec->CpuFollowSkinnedMesh)
+	{
+		for (int32 i = 0; i < Count; ++i)
+		{
+			Rec->CpuFollowSkinnedMesh->SetCustomPrimitiveDataFloat(StartIndex + i, Values[i]);
+		}
+	}
+}
+
+const float* UGameInstancedAnimationGraphSubsystem::GetInstanceCustomDataPtr(const FGameInstancedAnimationGraphHandle& Handle, int32& OutNum) const
+{
+	OutNum = 0;
+	const FInstancedAnimRecord* Rec = ResolveRecord(Handle);
+	if (!Rec || Rec->MaterialCustomData.Num() == 0)
+	{
+		return nullptr;
+	}
+	OutNum = Rec->MaterialCustomData.Num();
+	return Rec->MaterialCustomData.GetData();
 }
 
 bool UGameInstancedAnimationGraphSubsystem::GetOrBuildSkeletonStaticData(
@@ -1910,6 +2018,30 @@ void UGameInstancedAnimationGraphSubsystem::ShrinkBucket(USkeletalMesh* Skeletal
 	CompactAndShrinkMaster(*Found, TargetCap);
 }
 
+int32 UGameInstancedAnimationGraphSubsystem::GetBucketSlotCapacity(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph) const
+{
+	if (!SkeletalMesh || !AnimGraph) { return 0; }
+	USkeleton* Skeleton = SkeletalMesh->GetSkeleton();
+	if (!Skeleton) { return 0; }
+
+	int32 GroupIndex = INDEX_NONE;
+	for (auto It = Groups.CreateConstIterator(); It; ++It)
+	{
+		if (It->AnimGraph == AnimGraph && It->Skeleton == Skeleton)
+		{
+			GroupIndex = It.GetIndex();
+			break;
+		}
+	}
+	if (GroupIndex == INDEX_NONE) { return 0; }
+
+	const FBucketKey Key{ SkeletalMesh, GroupIndex, /*bFollower=*/false };
+	const int32* Found = BucketByKey.Find(Key);
+	if (!Found || !Buckets.IsValidIndex(*Found)) { return 0; }
+
+	return Buckets[*Found].GetTotalSlotCapacity();
+}
+
 void UGameInstancedAnimationGraphSubsystem::ShrinkAllBuckets()
 {
 	check(IsInGameThread());
@@ -2223,6 +2355,11 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddIns
 		Bucket->DirtyTransformSlots.Add((uint32)AllocatedSlot);
 	}
 
+	if (Bucket->NumCustomDataFloats > 0)
+	{
+		NewRecord.MaterialCustomData.SetNumZeroed(Bucket->NumCustomDataFloats);
+	}
+
 	// Force initial GPU param upload for all nodes on this slot (event-driven; no per-frame scan).
 	for (int32 NodeIdx = 0; NodeIdx < Group.Compiled->NumNodes; ++NodeIdx)
 	{
@@ -2476,6 +2613,13 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterGpuToCpu(const FGameInst
 	Rec->ISKMC = nullptr;
 	Rec->InstanceId = FPrimitiveInstanceId();
 
+	if (Rec->MaterialCustomData.Num() > 0)
+	{
+		USkeletalMeshComponent* Skinned = IGIAG_ActorInterface::Execute_GetInstancedAnimationSkinnedMesh(Rec->CpuProxyActor);
+		check(Skinned);
+		Skinned->SetCustomPrimitiveDataFloatArray(0, TConstArrayView<float>(Rec->MaterialCustomData));
+	}
+
 	// Mark all attachments as CPU-owned (skip GPU attach compute writes).
 	// This prevents other GPU instances evaluating the same ProviderState from overwriting CPU sync/hide.
 	if (Rec->AttachHandles.Num() > 0)
@@ -2675,6 +2819,10 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterGpuToCpu(const FGameInst
 			}
 
 			FollowRec.CpuFollowSkinnedMesh = FPrivateUtils::CreateCpuFollowComponent(Rec->CpuProxyActor, Leader, FollowRec.SkeletalMesh);
+			if (FollowRec.MaterialCustomData.Num() > 0)
+			{
+				FollowRec.CpuFollowSkinnedMesh->SetCustomPrimitiveDataFloatArray(0, TConstArrayView<float>(FollowRec.MaterialCustomData));
+			}
 		}
 	}
 
@@ -2805,6 +2953,11 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterCpuToGpu(const FGameInst
 			FollowRec.BucketIndex = FollowBucketIndex;
 			FollowRec.GroupIndex = Rec->GroupIndex;
 			FollowRec.SlotIndex = MasterBucketSlot;
+
+			if (FollowRec.MaterialCustomData.Num() > 0)
+			{
+				FollowBucket.ISKMC->SetCustomData(InstanceId, TConstArrayView<float>(FollowRec.MaterialCustomData));
+			}
 		}
 	}
 
@@ -2963,6 +3116,12 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterCpuToGpu(const FGameInst
 
 	Rec->ISKMC = Bucket.ISKMC;
 	Rec->InstanceId = InstanceId;
+
+	if (Rec->MaterialCustomData.Num() > 0)
+	{
+		Bucket.ISKMC->SetCustomData(InstanceId, TConstArrayView<float>(Rec->MaterialCustomData));
+	}
+
 	if (Bucket.TransformDirty[MasterBucketSlot])
 	{
 		Bucket.DirtyTransformSlots.Add((uint32)MasterBucketSlot);
@@ -3898,6 +4057,26 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddFol
 		NewRec.GroupIndex = MasterRec->GroupIndex;
 		NewRec.SlotIndex = MasterRec->SlotIndex;
 		NewRec.MasterRecordIndex = MasterHandle.RecordIndex;
+		{
+			int32 ConfiguredCustomDataFloats = -1;
+			if (auto UserData = SkeletalMesh->GetAssetUserData<UGIAG_SkeletalMeshUserData>())
+			{
+				ConfiguredCustomDataFloats = UserData->NumCustomDataFloats;
+			}
+			int32 NumCustomDataFloats = 0;
+			if (ConfiguredCustomDataFloats >= 0)
+			{
+				NumCustomDataFloats = FMath::Clamp(ConfiguredCustomDataFloats, 0, (int32)FCustomPrimitiveData::NumCustomPrimitiveDataFloats);
+			}
+			else
+			{
+				NumCustomDataFloats = UGameInstancedAnimationGraphSubsystem::DetectNumCustomDataFloatsFromMaterials(*SkeletalMesh);
+			}
+			if (NumCustomDataFloats > 0)
+			{
+				NewRec.MaterialCustomData.SetNumZeroed(NumCustomDataFloats);
+			}
+		}
 
 		const int32 RecordIndex = AnimRecords.Add(MoveTemp(NewRec));
 		if (AnimRecordSerials.Num() <= RecordIndex)
@@ -4017,6 +4196,10 @@ FGameInstancedAnimationGraphHandle UGameInstancedAnimationGraphSubsystem::AddFol
 	NewRec.GroupIndex = MasterRec->GroupIndex;
 	NewRec.SlotIndex = MasterBucketSlot;
 	NewRec.MasterRecordIndex = MasterHandle.RecordIndex;
+	if (FollowBucket.NumCustomDataFloats > 0)
+	{
+		NewRec.MaterialCustomData.SetNumZeroed(FollowBucket.NumCustomDataFloats);
+	}
 
 	const int32 RecordIndex = AnimRecords.Add(MoveTemp(NewRec));
 	if (AnimRecordSerials.Num() <= RecordIndex)

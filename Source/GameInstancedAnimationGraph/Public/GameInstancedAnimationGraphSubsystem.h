@@ -238,8 +238,9 @@ class GAMEINSTANCEDANIMATIONGRAPH_API UGameInstancedAnimationGraphSubsystem : pu
 	friend FGIAG_AnimationsTestAPI;
 	friend FGameInstancedAnimationGraphHandle;
 	friend FGameInstancedAnimationAttachHandle;
-public:
+protected:
 	bool DoesSupportWorldType(const EWorldType::Type WorldType) const override { return WorldType != EWorldType::None && WorldType != EWorldType::Inactive && WorldType != EWorldType::GameRPC; }
+public:
 	TStatId GetStatId() const override { RETURN_QUICK_DECLARE_CYCLE_STAT(GameInstancedAnimSubsystem, STATGROUP_Tickables); }
 	bool IsTickableInEditor() const override { return true; }
 	void Tick(float DeltaTime) override;
@@ -270,6 +271,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim")
 	void ShrinkAllBuckets();
 
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim")
+	int32 GetBucketSlotCapacity(USkeletalMesh* SkeletalMesh, UGIAG_AnimGraph* AnimGraph) const;
+
 	/** Switch this handle between GPU backend (ISKMC) and CPU backend (CpuProxyActor). Master only. */
 	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|CPU")
 	void SetInstanceUseCPUMode(const FGameInstancedAnimationGraphHandle& Handle, bool bUseCPU);
@@ -282,7 +286,38 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim")
 	FTransform GetInstanceTransform(const FGameInstancedAnimationGraphHandle& Handle) const;
-	
+
+	// ---- Per-instance custom data (material parameters) ----
+
+	void SetInstanceCustomDataRange(const FGameInstancedAnimationGraphHandle& Handle, int32 StartIndex, TConstArrayView<float> Values);
+	const float* GetInstanceCustomDataPtr(const FGameInstancedAnimationGraphHandle& Handle, int32& OutNum) const;
+
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|CustomData")
+	void SetInstanceCustomDataFloat(const FGameInstancedAnimationGraphHandle& Handle, int32 DataIndex, float Value) { SetInstanceCustomDataRange(Handle, DataIndex, MakeArrayView(&Value, 1)); }
+
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|CustomData")
+	void SetInstanceCustomDataVector2(const FGameInstancedAnimationGraphHandle& Handle, int32 DataIndex, FVector2f Value) { SetInstanceCustomDataRange(Handle, DataIndex, MakeArrayView(&Value.X, 2)); }
+
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|CustomData")
+	void SetInstanceCustomDataVector3(const FGameInstancedAnimationGraphHandle& Handle, int32 DataIndex, FVector3f Value) { SetInstanceCustomDataRange(Handle, DataIndex, MakeArrayView(&Value.X, 3)); }
+
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|CustomData")
+	void SetInstanceCustomDataColor(const FGameInstancedAnimationGraphHandle& Handle, int32 DataIndex, FLinearColor Value) { SetInstanceCustomDataRange(Handle, DataIndex, MakeArrayView(&Value.R, 4)); }
+
+	void SetInstanceCustomData(const FGameInstancedAnimationGraphHandle& Handle, TConstArrayView<float> Values) { SetInstanceCustomDataRange(Handle, 0, Values); }
+
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|CustomData")
+	float GetInstanceCustomDataFloat(const FGameInstancedAnimationGraphHandle& Handle, int32 DataIndex) const { int32 N=0; const float* P=GetInstanceCustomDataPtr(Handle,N); return (P && DataIndex>=0 && DataIndex<N) ? P[DataIndex] : 0.f; }
+
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|CustomData")
+	FVector2f GetInstanceCustomDataVector2(const FGameInstancedAnimationGraphHandle& Handle, int32 DataIndex) const { int32 N=0; const float* P=GetInstanceCustomDataPtr(Handle,N); return (P && DataIndex>=0 && DataIndex+2<=N) ? FVector2f(P[DataIndex],P[DataIndex+1]) : FVector2f::ZeroVector; }
+
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|CustomData")
+	FVector3f GetInstanceCustomDataVector3(const FGameInstancedAnimationGraphHandle& Handle, int32 DataIndex) const { int32 N=0; const float* P=GetInstanceCustomDataPtr(Handle,N); return (P && DataIndex>=0 && DataIndex+3<=N) ? FVector3f(P[DataIndex],P[DataIndex+1],P[DataIndex+2]) : FVector3f::ZeroVector; }
+
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|CustomData")
+	FLinearColor GetInstanceCustomDataColor(const FGameInstancedAnimationGraphHandle& Handle, int32 DataIndex) const { int32 N=0; const float* P=GetInstanceCustomDataPtr(Handle,N); return (P && DataIndex>=0 && DataIndex+4<=N) ? FLinearColor(P[DataIndex],P[DataIndex+1],P[DataIndex+2],P[DataIndex+3]) : FLinearColor(0,0,0,0); }
+
 	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim")
 	void PlayAnimation(const FGameInstancedAnimationGraphHandle& Handle, const UAnimSequence* AnimSequence, FName NodeName = TEXT("Default"), float BlendDurationSeconds = 0.2f, float StartSeconds = 0.f, bool bLoop = true, float PlayRate = 1.f);
 
@@ -376,6 +411,10 @@ public:
 	float FrustumCullMinRadius = 30.0f;
 
 	int32 RequestAnimClipIndex(const FGIAG_AnimNodeRef& NodeRef, const UAnimSequence* AnimSequence);
+
+	/** Detect NumCustomDataFloats from SkeletalMesh materials (runtime-safe, no editor-only data). */
+	static int32 DetectNumCustomDataFloatsFromMaterials(const USkeletalMesh& SkeletalMesh);
+
 protected:
 	void* FindAnimNodeImpl(const FGameInstancedAnimationGraphHandle& Handle, FName NodeName, FGIAG_AnimNodeRef& OutNodeRef) const;
 	FORCEINLINE const UScriptStruct* GetAnimNodeStruct(const FGIAG_AnimNodeRef& AnimNodeRef) const { return Groups[AnimNodeRef.GroupIndex].NodeProperties[AnimNodeRef.NodeIndex]->Struct; }
@@ -559,6 +598,9 @@ private:
 		TArray<TArray<uint32>> DirtyNodeParamSlotsByNode;
 		TBitArray<> DirtyNodeMask;
 		TArray<int32> DirtyNodeIndices;
+
+		// Per-instance custom data float count for this bucket's mesh (0 = no custom data).
+		int32 NumCustomDataFloats = 0;
 
 		TArray<uint32> GpuAliveSlots;
 		TArray<uint32> CpuAliveSlots;
@@ -873,6 +915,9 @@ public:
 
 		/** Attachments owned by this record (lifetime is tied to the instance). */
 		TArray<FGameInstancedAnimationAttachHandle> AttachHandles;
+
+		/** Per-instance material custom data (source of truth for all instances, synced to backend on write). */
+		TArray<float> MaterialCustomData;
 	};
 	TSparseArray<FInstancedAnimRecord> AnimRecords;
 
