@@ -132,26 +132,22 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 		// Fast-path: single contributing clip -> direct write (no extra loads/math).
 		if (bUse0 && !bUse1 && !bUse2 && !bUse3)
 		{
-			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, InstanceTime, S.Clips[0]);
-			RW_OutPose[OutIndex] = AnimTRS[Base + BoneIndex];
+			RW_OutPose[OutIndex] = GIAG_SampleBakedClipTRS(ClipMetas, AnimTRS, NumBones, BoneIndex, InstanceTime, S.Clips[0]);
 			return;
 		}
 		if (!bUse0 && bUse1 && !bUse2 && !bUse3)
 		{
-			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, InstanceTime, S.Clips[1]);
-			RW_OutPose[OutIndex] = AnimTRS[Base + BoneIndex];
+			RW_OutPose[OutIndex] = GIAG_SampleBakedClipTRS(ClipMetas, AnimTRS, NumBones, BoneIndex, InstanceTime, S.Clips[1]);
 			return;
 		}
 		if (!bUse0 && !bUse1 && bUse2 && !bUse3)
 		{
-			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, InstanceTime, S.Clips[2]);
-			RW_OutPose[OutIndex] = AnimTRS[Base + BoneIndex];
+			RW_OutPose[OutIndex] = GIAG_SampleBakedClipTRS(ClipMetas, AnimTRS, NumBones, BoneIndex, InstanceTime, S.Clips[2]);
 			return;
 		}
 		if (!bUse0 && !bUse1 && !bUse2 && bUse3)
 		{
-			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, InstanceTime, S.Clips[3]);
-			RW_OutPose[OutIndex] = AnimTRS[Base + BoneIndex];
+			RW_OutPose[OutIndex] = GIAG_SampleBakedClipTRS(ClipMetas, AnimTRS, NumBones, BoneIndex, InstanceTime, S.Clips[3]);
 			return;
 		}
 
@@ -161,23 +157,19 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 		FGIAG_BoneTRS T3 = T0;
 		if (bUse0)
 		{
-			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, InstanceTime, S.Clips[0]);
-			T0 = AnimTRS[Base + BoneIndex];
+			T0 = GIAG_SampleBakedClipTRS(ClipMetas, AnimTRS, NumBones, BoneIndex, InstanceTime, S.Clips[0]);
 		}
 		if (bUse1)
 		{
-			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, InstanceTime, S.Clips[1]);
-			T1 = AnimTRS[Base + BoneIndex];
+			T1 = GIAG_SampleBakedClipTRS(ClipMetas, AnimTRS, NumBones, BoneIndex, InstanceTime, S.Clips[1]);
 		}
 		if (bUse2)
 		{
-			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, InstanceTime, S.Clips[2]);
-			T2 = AnimTRS[Base + BoneIndex];
+			T2 = GIAG_SampleBakedClipTRS(ClipMetas, AnimTRS, NumBones, BoneIndex, InstanceTime, S.Clips[2]);
 		}
 		if (bUse3)
 		{
-			uint Base = GIAG_CalcPoseBase(ClipMetas, NumBones, InstanceTime, S.Clips[3]);
-			T3 = AnimTRS[Base + BoneIndex];
+			T3 = GIAG_SampleBakedClipTRS(ClipMetas, AnimTRS, NumBones, BoneIndex, InstanceTime, S.Clips[3]);
 		}
 
 		// Blend4: translation/scale linear; rotation weighted nlerp with sign alignment (skip exact-zero weights).

@@ -95,7 +95,7 @@ namespace
 		BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 			SHADER_PARAMETER(uint32, NumBones)
 			SHADER_PARAMETER(uint32, SrcNumBones)
-			SHADER_PARAMETER(uint32, NumActive)
+			SHADER_PARAMETER(uint32, NumActiveInstances)
 			SHADER_PARAMETER(uint32, NumDsts)
 			SHADER_PARAMETER(uint32, MaxTransformCount)
 			SHADER_PARAMETER(uint32, DispatchGroupCountX)
@@ -480,7 +480,7 @@ namespace GIAG
 			auto* ShaderParams = GraphBuilder.AllocParameters<FGIAG_FollowerPoseToTransformCS::FParameters>();
 			ShaderParams->NumBones = Params.NumBones;
 			ShaderParams->SrcNumBones = Params.SrcNumBones;
-			ShaderParams->NumActive = Params.NumActive;
+			ShaderParams->NumActiveInstances = Params.NumActive;
 			ShaderParams->NumDsts = Params.NumDsts;
 			ShaderParams->MaxTransformCount = Params.MaxTransformCount;
 			ShaderParams->DispatchGroupCountX = (uint32)GroupCount.X;

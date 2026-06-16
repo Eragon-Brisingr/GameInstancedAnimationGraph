@@ -8,7 +8,7 @@
 
 uint NumBones;            // destination bone count (skeleton bone count)
 uint SrcNumBones;         // source (master) bone count
-uint NumActive;           // master active instance count
+uint NumActiveInstances;  // master active instance count
 uint NumDsts;
 uint MaxTransformCount;   // engine-side per-animation-slot transform stride (follower bucket)
 
@@ -37,14 +37,14 @@ void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
 	uint GroupLinear = DispatchGroupOffset + GroupId.x + GroupId.y * DispatchGroupCountX + GroupId.z * (DispatchGroupCountX * DispatchGroupCountY);
 	uint DispatchId = GroupLinear * 64u + GroupIndex;
 
-	uint Total = NumDsts * NumActive * NumBones;
+	uint Total = NumDsts * NumActiveInstances * NumBones;
 	if (DispatchId >= Total)
 	{
 		return;
 	}
 
-	uint DstIndex = DispatchId / (NumActive * NumBones);
-	uint Local = DispatchId - DstIndex * (NumActive * NumBones);
+	uint DstIndex = DispatchId / (NumActiveInstances * NumBones);
+	uint Local = DispatchId - DstIndex * (NumActiveInstances * NumBones);
 	uint ActiveIdx = Local / NumBones;
 	uint DestBone = Local - ActiveIdx * NumBones;
 

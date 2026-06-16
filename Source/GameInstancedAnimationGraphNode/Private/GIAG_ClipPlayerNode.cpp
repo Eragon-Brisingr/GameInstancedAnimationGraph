@@ -261,6 +261,85 @@ namespace
 		return FMath::Clamp(Time, 0.0f, SafeLen);
 	}
 
+	struct FBakedFrameSample
+	{
+		float Time0 = 0.0f;
+		float Time1 = 0.0f;
+		float Alpha = 0.0f;
+	};
+
+	static FBakedFrameSample CalcBakedFrameSample(float PlaybackTimeSeconds, float Len, float SecondsPerFrame, bool bLoop)
+	{
+		const float SafeLen = FMath::Max(Len, 1e-6f);
+		const float SPF = FMath::Max(1.0f / 120.0f, SecondsPerFrame);
+		const float Time = WrapOrClampTime(PlaybackTimeSeconds, SafeLen, bLoop);
+		const int32 LastFrame = FMath::Max(0, FMath::CeilToInt(SafeLen / SPF));
+		const int32 Frame0 = FMath::Clamp(FMath::FloorToInt(Time / SPF), 0, LastFrame);
+		const int32 Frame1 = FMath::Min(Frame0 + 1, LastFrame);
+
+		FBakedFrameSample Sample;
+		Sample.Time0 = FMath::Min((float)Frame0 * SPF, SafeLen);
+		Sample.Time1 = FMath::Min((float)Frame1 * SPF, SafeLen);
+		Sample.Alpha = (Sample.Time1 > Sample.Time0 + 1e-6f) ? GIAG::Clamp01((Time - Sample.Time0) / (Sample.Time1 - Sample.Time0)) : 0.0f;
+		return Sample;
+	}
+
+	static FTransform BlendBakedFrameTRS(const FTransform& A, const FTransform& B, float Alpha)
+	{
+		FQuat QA = A.GetRotation();
+		FQuat QB = B.GetRotation();
+		if ((QA | QB) < 0.0)
+		{
+			QB.X = -QB.X;
+			QB.Y = -QB.Y;
+			QB.Z = -QB.Z;
+			QB.W = -QB.W;
+		}
+
+		FQuat Q = FQuat(
+			FMath::Lerp(QA.X, QB.X, Alpha),
+			FMath::Lerp(QA.Y, QB.Y, Alpha),
+			FMath::Lerp(QA.Z, QB.Z, Alpha),
+			FMath::Lerp(QA.W, QB.W, Alpha));
+		Q.Normalize();
+
+		return FTransform(
+			Q,
+			FMath::Lerp(A.GetTranslation(), B.GetTranslation(), Alpha),
+			FMath::Lerp(A.GetScale3D(), B.GetScale3D(), Alpha));
+	}
+
+	static void EvalAnimSequenceBakedInterpolatedLocalPose(
+		const UAnimSequence* Anim,
+		float PlaybackTimeSeconds,
+		float SecondsPerFrame,
+		bool bLoop,
+		USkeleton* Skeleton,
+		TArray<FTransform>& OutLocalTransforms)
+	{
+		check(Anim);
+		check(Skeleton);
+
+		const FBakedFrameSample Sample = CalcBakedFrameSample(PlaybackTimeSeconds, Anim->GetPlayLength(), SecondsPerFrame, bLoop);
+		if (Sample.Alpha <= 1e-6f)
+		{
+			GIAG::EvalAnimSequenceLocalPose(Anim, Sample.Time0, Skeleton, OutLocalTransforms);
+			return;
+		}
+
+		TArray<FTransform> Pose0;
+		TArray<FTransform> Pose1;
+		GIAG::EvalAnimSequenceLocalPose(Anim, Sample.Time0, Skeleton, Pose0);
+		GIAG::EvalAnimSequenceLocalPose(Anim, Sample.Time1, Skeleton, Pose1);
+		check(Pose0.Num() == Pose1.Num());
+
+		OutLocalTransforms.SetNumUninitialized(Pose0.Num());
+		for (int32 BoneIndex = 0; BoneIndex < Pose0.Num(); ++BoneIndex)
+		{
+			OutLocalTransforms[BoneIndex] = BlendBakedFrameTRS(Pose0[BoneIndex], Pose1[BoneIndex], Sample.Alpha);
+		}
+	}
+
 	static float CalcBlendAlpha(float NowSeconds, float BlendStartTime, float BlendDuration)
 	{
 		if (BlendDuration <= 1e-6f)
@@ -337,7 +416,7 @@ namespace
 
 namespace GIAG
 {
-	extern GAMEINSTANCEDANIMATIONGRAPH_API bool bQuantTimeInCpuEval;
+	extern GAMEINSTANCEDANIMATIONGRAPH_API bool bUseBakedFrameInterpolationInCpuEval;
 }
 
 void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& Context)
@@ -400,23 +479,23 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 				return Anim;
 			};
 
-			auto ComputeSampleTimeSeconds = [&](const UAnimSequence* Anim, uint32 ClipSlot) -> float
+			auto EvalClipPose = [&](const UAnimSequence* Anim, uint32 ClipSlot, TArray<FTransform>& OutPose)
 			{
 				const float Len = Anim->GetPlayLength();
 				const float Playback = (InstanceTime - SlotState.Clips[ClipSlot].StartTime) * SlotState.Clips[ClipSlot].PlayRate + SlotState.Clips[ClipSlot].StartSeconds;
 #if WITH_EDITOR
-				if (GIAG::bQuantTimeInCpuEval)
+				if (GIAG::bUseBakedFrameInterpolationInCpuEval)
 				{
-					// Match GPU baked-clip sampling: frames are baked at SecondsPerFrame, so sample on the same quantized timeline.
 					float SecondsPerFrame = 1.0f / 30.0f;
 					if (UGIAG_AnimSequenceUserData* UserData = Cast<UGIAG_AnimSequenceUserData>(const_cast<UAnimSequence*>(Anim)->GetAssetUserDataOfClass(UGIAG_AnimSequenceUserData::StaticClass())))
 					{
 						SecondsPerFrame = UserData->SecondsPerFrame;
 					}
-					return GIAG::QuantTime(Playback, Len, SecondsPerFrame, SlotState.Clips[ClipSlot].bLoop != 0u);
+					EvalAnimSequenceBakedInterpolatedLocalPose(Anim, Playback, SecondsPerFrame, SlotState.Clips[ClipSlot].bLoop != 0u, Skeleton, OutPose);
+					return;
 				}
 #endif
-				return WrapOrClampTime(Playback, Len, SlotState.Clips[ClipSlot].bLoop != 0u);
+				GIAG::EvalAnimSequenceLocalPose(Anim, WrapOrClampTime(Playback, Len, SlotState.Clips[ClipSlot].bLoop != 0u), Skeleton, OutPose);
 			};
 
 			// Step 2) Fast-path: a single clip contributes -> evaluate just that clip and write directly.
@@ -426,8 +505,7 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 				check(Anim->GetSkeleton() == Skeleton);
 
 				TArray<FTransform> Pose;
-				const float SampleTime = ComputeSampleTimeSeconds(Anim, 0u);
-				GIAG::EvalAnimSequenceLocalPose(Anim, SampleTime, Skeleton, Pose);
+				EvalClipPose(Anim, 0u, Pose);
 				check(Pose.Num() == Context.NumBones);
 				for (int32 BoneIndex = 0; BoneIndex < Context.NumBones; ++BoneIndex)
 				{
@@ -441,8 +519,7 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 				check(Anim->GetSkeleton() == Skeleton);
 
 				TArray<FTransform> Pose;
-				const float SampleTime = ComputeSampleTimeSeconds(Anim, 1u);
-				GIAG::EvalAnimSequenceLocalPose(Anim, SampleTime, Skeleton, Pose);
+				EvalClipPose(Anim, 1u, Pose);
 				check(Pose.Num() == Context.NumBones);
 				for (int32 BoneIndex = 0; BoneIndex < Context.NumBones; ++BoneIndex)
 				{
@@ -456,8 +533,7 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 				check(Anim->GetSkeleton() == Skeleton);
 
 				TArray<FTransform> Pose;
-				const float SampleTime = ComputeSampleTimeSeconds(Anim, 2u);
-				GIAG::EvalAnimSequenceLocalPose(Anim, SampleTime, Skeleton, Pose);
+				EvalClipPose(Anim, 2u, Pose);
 				check(Pose.Num() == Context.NumBones);
 				for (int32 BoneIndex = 0; BoneIndex < Context.NumBones; ++BoneIndex)
 				{
@@ -471,8 +547,7 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 				check(Anim->GetSkeleton() == Skeleton);
 
 				TArray<FTransform> Pose;
-				const float SampleTime = ComputeSampleTimeSeconds(Anim, 3u);
-				GIAG::EvalAnimSequenceLocalPose(Anim, SampleTime, Skeleton, Pose);
+				EvalClipPose(Anim, 3u, Pose);
 				check(Pose.Num() == Context.NumBones);
 				for (int32 BoneIndex = 0; BoneIndex < Context.NumBones; ++BoneIndex)
 				{
@@ -490,8 +565,7 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 				const UAnimSequence* Anim = ResolveAnim(ClipSlot);
 				check(Anim->GetSkeleton() == Skeleton);
 
-				const float SampleTime = ComputeSampleTimeSeconds(Anim, ClipSlot);
-				GIAG::EvalAnimSequenceLocalPose(Anim, SampleTime, Skeleton, ClipPose[ClipSlot]);
+				EvalClipPose(Anim, ClipSlot, ClipPose[ClipSlot]);
 				check(ClipPose[ClipSlot].Num() == Context.NumBones);
 				bHasPose[ClipSlot] = true;
 			};

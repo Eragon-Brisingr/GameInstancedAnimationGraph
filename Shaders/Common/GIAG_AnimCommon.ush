@@ -264,6 +264,58 @@ uint GIAG_CalcFrameIndex(in FGIAG_ClipMeta Meta, in float PlaybackTimeSeconds, i
 	return (uint)FrameClamped;
 }
 
+struct FGIAG_BakedFrameSample
+{
+	uint Frame0;
+	uint Frame1;
+	float Alpha;
+};
+
+FGIAG_BakedFrameSample GIAG_CalcBakedFrameSample(in FGIAG_ClipMeta Meta, in float PlaybackTimeSeconds, in uint bLoop)
+{
+	float SecondsPerFrame = max(1e-6, Meta.SecondsPerFrame);
+	float Len = max(1e-6, Meta.SequenceLengthSeconds);
+	uint LastFrame = (uint)max(0, Meta.NumFrames - 1);
+
+	float T = PlaybackTimeSeconds;
+	if (bLoop != 0)
+	{
+		T = fmod(T, Len);
+		if (T < 0) { T += Len; }
+	}
+	else
+	{
+		T = clamp(T, 0.0, Len);
+	}
+
+	float FrameF = floor(T / SecondsPerFrame);
+	uint Frame0 = (uint)clamp(FrameF, 0.0, (float)LastFrame);
+	uint Frame1 = min(Frame0 + 1u, LastFrame);
+
+	float Time0 = min((float)Frame0 * SecondsPerFrame, Len);
+	float Time1 = min((float)Frame1 * SecondsPerFrame, Len);
+	float Alpha = (Time1 > Time0 + 1e-6) ? saturate((T - Time0) / (Time1 - Time0)) : 0.0;
+
+	FGIAG_BakedFrameSample Sample;
+	Sample.Frame0 = Frame0;
+	Sample.Frame1 = Frame1;
+	Sample.Alpha = Alpha;
+	return Sample;
+}
+
+FGIAG_BoneTRS GIAG_LerpBoneTRS(in FGIAG_BoneTRS A, in FGIAG_BoneTRS B, in float Alpha)
+{
+	FGIAG_BoneTRS R;
+	R.Translation = lerp(A.Translation, B.Translation, Alpha);
+	R.TranslationPad = 0.0;
+	R.Scale3D = lerp(A.Scale3D, B.Scale3D, Alpha);
+	R.ScalePad = 0.0;
+
+	FQuat BAligned = GIAG_AlignQuatToRef(A.Rotation, B.Rotation);
+	R.Rotation = GIAG_NormalizeQuat(lerp(A.Rotation, BAligned, Alpha));
+	return R;
+}
+
 float GIAG_CalcBlendAlpha(in float CurrentTimeSeconds, in float BlendStartTime, in float BlendDuration)
 {
 	if (BlendDuration <= 1e-6)
@@ -284,6 +336,31 @@ uint GIAG_CalcPoseBase(
 	float Playback = (CurrentTimeSeconds - CS.StartTime) * CS.PlayRate + CS.StartSeconds;
 	uint Frame = GIAG_CalcFrameIndex(Meta, Playback, CS.Loop);
 	return (uint)Meta.StartTransformIndex + Frame * NumBones;
+}
+
+FGIAG_BoneTRS GIAG_SampleBakedClipTRS(
+	StructuredBuffer<FGIAG_ClipMeta> InClipMetas,
+	StructuredBuffer<FGIAG_BoneTRS> InAnimTRS,
+	in uint NumBones,
+	in uint BoneIndex,
+	in float CurrentTimeSeconds,
+	in FGIAG_ClipState CS)
+{
+	uint ClipIndex = (uint)max(0, CS.Clip);
+	FGIAG_ClipMeta Meta = GIAG_ReadClipMeta(InClipMetas, ClipIndex);
+	float Playback = (CurrentTimeSeconds - CS.StartTime) * CS.PlayRate + CS.StartSeconds;
+	FGIAG_BakedFrameSample Sample = GIAG_CalcBakedFrameSample(Meta, Playback, CS.Loop);
+
+	uint Base0 = (uint)Meta.StartTransformIndex + Sample.Frame0 * NumBones + BoneIndex;
+	FGIAG_BoneTRS T0 = InAnimTRS[Base0];
+	if (Sample.Frame0 == Sample.Frame1 || Sample.Alpha <= 1e-6)
+	{
+		return T0;
+	}
+
+	uint Base1 = (uint)Meta.StartTransformIndex + Sample.Frame1 * NumBones + BoneIndex;
+	FGIAG_BoneTRS T1 = InAnimTRS[Base1];
+	return GIAG_LerpBoneTRS(T0, T1, Sample.Alpha);
 }
 
 //------------------------------------------------------------------------------
