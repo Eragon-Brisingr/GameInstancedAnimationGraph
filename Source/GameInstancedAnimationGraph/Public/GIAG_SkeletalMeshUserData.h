@@ -17,6 +17,6 @@ public:
 	 *  0  = no custom data.
 	 *  >0 = explicit float count (clamped to FCustomPrimitiveData::NumCustomPrimitiveDataFloats). */
 	UPROPERTY(EditAnywhere, meta=(ClampMin="-1", ClampMax="36"))
-	int32 NumCustomDataFloats = -1;
+	int32 NumMaterialDataFloats = -1;
 };
 

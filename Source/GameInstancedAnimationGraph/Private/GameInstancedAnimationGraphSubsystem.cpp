@@ -120,26 +120,26 @@ struct UGameInstancedAnimationGraphSubsystem::FPrivateUtils
 		check(ISKMC);
 
 		float AnimationMinScreenSize = 0.0001f;
-		int32 ConfiguredCustomDataFloats = -1;
+		int32 ConfiguredMaterialDataFloats = -1;
 		if (auto UserData = SkeletalMesh.GetAssetUserData<UGIAG_SkeletalMeshUserData>())
 		{
 			AnimationMinScreenSize = UserData->AnimationMinScreenSize;
-			ConfiguredCustomDataFloats = UserData->NumCustomDataFloats;
+			ConfiguredMaterialDataFloats = UserData->NumMaterialDataFloats;
 		}
 
-		int32 NumCustomDataFloats = 0;
-		if (ConfiguredCustomDataFloats >= 0)
+		int32 NumMaterialDataFloats = 0;
+		if (ConfiguredMaterialDataFloats >= 0)
 		{
-			NumCustomDataFloats = FMath::Clamp(ConfiguredCustomDataFloats, 0, (int32)FCustomPrimitiveData::NumCustomPrimitiveDataFloats);
+			NumMaterialDataFloats = FMath::Clamp(ConfiguredMaterialDataFloats, 0, (int32)FCustomPrimitiveData::NumCustomPrimitiveDataFloats);
 		}
 		else
 		{
-			NumCustomDataFloats = GIAG::DetectNumCustomDataFloatsFromMaterials(SkeletalMesh);
+			NumMaterialDataFloats = GIAG::DetectNumMaterialDataFloatsFromMaterials(SkeletalMesh);
 		}
-		InBucket.NumCustomDataFloats = NumCustomDataFloats;
-		if (NumCustomDataFloats > 0)
+		InBucket.NumMaterialDataFloats = NumMaterialDataFloats;
+		if (NumMaterialDataFloats > 0)
 		{
-			InBucket.CustomDataNameToIndex = GIAG::BuildCustomDataIndexMapFromMaterials(SkeletalMesh);
+			InBucket.MaterialDataNameToIndex = GIAG::BuildMaterialDataIndexMapFromMaterials(SkeletalMesh);
 		}
 
 		ISKMC->SetAnimationMinScreenSize(AnimationMinScreenSize);
@@ -147,9 +147,9 @@ struct UGameInstancedAnimationGraphSubsystem::FPrivateUtils
 		ISKMC->bNavigationRelevant = false;
 		ISKMC->CreationMethod = EComponentCreationMethod::Instance;
 
-		if (NumCustomDataFloats > 0)
+		if (NumMaterialDataFloats > 0)
 		{
-			ISKMC->SetNumCustomDataFloats(NumCustomDataFloats);
+			ISKMC->SetNumCustomDataFloats(NumMaterialDataFloats);
 		}
 
 		ISKMC->RegisterComponent();
@@ -305,9 +305,9 @@ void UGameInstancedAnimationGraphSubsystem::FMeshBucket::InitBucketStorage(
 	DirtyNodeMask.SetNum(NumNodes, false);
 	DirtyNodeIndices.Reset();
 
-	if (NumCustomDataFloats > 0)
+	if (NumMaterialDataFloats > 0)
 	{
-		CustomDataBySlot.SetNumZeroed((int64)TotalCap * (int64)NumCustomDataFloats);
+		MaterialDataBySlot.SetNumZeroed((int64)TotalCap * (int64)NumMaterialDataFloats);
 	}
 
 	GpuAliveSlots.Reset();
@@ -370,9 +370,9 @@ void UGameInstancedAnimationGraphSubsystem::FMeshBucket::GrowCapacity(
 		NodeParamDirtyBitsByNode[NodeIdx].SetNum(NewCapacity, false);
 	}
 
-	if (NumCustomDataFloats > 0)
+	if (NumMaterialDataFloats > 0)
 	{
-		CustomDataBySlot.SetNumZeroed((int64)NewCapacity * (int64)NumCustomDataFloats);
+		MaterialDataBySlot.SetNumZeroed((int64)NewCapacity * (int64)NumMaterialDataFloats);
 	}
 
 	GpuAliveListIndexBySlot.SetNum(NewCapacity);
@@ -782,9 +782,7 @@ void UGameInstancedAnimationGraphSubsystem::EnsureHostActor()
 	HostActor = A;
 }
 
-
-
-void UGameInstancedAnimationGraphSubsystem::SetInstanceCustomDataRange(const FGameInstancedAnimationGraphHandle& Handle, int32 StartIndex, TConstArrayView<float> Values)
+void UGameInstancedAnimationGraphSubsystem::SetMaterialDataRange(const FGameInstancedAnimationGraphHandle& Handle, int32 StartIndex, TConstArrayView<float> Values)
 {
 	check(IsInGameThread());
 	const FInstancedAnimRecord* Rec = ResolveRecord(Handle);
@@ -793,12 +791,12 @@ void UGameInstancedAnimationGraphSubsystem::SetInstanceCustomDataRange(const FGa
 	check(Buckets.IsValidIndex(Rec->BucketIndex));
 
 	FMeshBucket& Bucket = Buckets[Rec->BucketIndex];
-	const int32 N = Bucket.NumCustomDataFloats;
+	const int32 N = Bucket.NumMaterialDataFloats;
 	check(N > 0);
 	check(StartIndex >= 0 && StartIndex + Values.Num() <= N);
 	check(Rec->SlotIndex >= 0 && Rec->SlotIndex < Bucket.GetTotalSlotCapacity());
 
-	float* SlotBase = Bucket.CustomDataBySlot.GetData() + (int64)Rec->SlotIndex * (int64)N;
+	float* SlotBase = Bucket.MaterialDataBySlot.GetData() + (int64)Rec->SlotIndex * (int64)N;
 	FMemory::Memcpy(SlotBase + StartIndex, Values.GetData(), Values.Num() * sizeof(float));
 
 	const int32 Count = Values.Num();
@@ -827,7 +825,7 @@ void UGameInstancedAnimationGraphSubsystem::SetInstanceCustomDataRange(const FGa
 	}
 }
 
-const float* UGameInstancedAnimationGraphSubsystem::GetInstanceCustomDataPtr(const FGameInstancedAnimationGraphHandle& Handle, int32& OutNum) const
+const float* UGameInstancedAnimationGraphSubsystem::GetMaterialDataPtr(const FGameInstancedAnimationGraphHandle& Handle, int32& OutNum) const
 {
 	OutNum = 0;
 	const FInstancedAnimRecord* Rec = ResolveRecord(Handle);
@@ -837,16 +835,16 @@ const float* UGameInstancedAnimationGraphSubsystem::GetInstanceCustomDataPtr(con
 	}
 	check(Buckets.IsValidIndex(Rec->BucketIndex));
 	const FMeshBucket& Bucket = Buckets[Rec->BucketIndex];
-	if (Bucket.NumCustomDataFloats == 0)
+	if (Bucket.NumMaterialDataFloats == 0)
 	{
 		return nullptr;
 	}
 	check(Rec->SlotIndex >= 0 && Rec->SlotIndex < Bucket.GetTotalSlotCapacity());
-	OutNum = Bucket.NumCustomDataFloats;
-	return Bucket.CustomDataBySlot.GetData() + (int64)Rec->SlotIndex * (int64)Bucket.NumCustomDataFloats;
+	OutNum = Bucket.NumMaterialDataFloats;
+	return Bucket.MaterialDataBySlot.GetData() + (int64)Rec->SlotIndex * (int64)Bucket.NumMaterialDataFloats;
 }
 
-int32 UGameInstancedAnimationGraphSubsystem::ResolveCustomDataIndex(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName) const
+int32 UGameInstancedAnimationGraphSubsystem::ResolveMaterialDataIndex(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName) const
 {
 	const FInstancedAnimRecord* Rec = ResolveRecord(Handle);
 	if (Rec == nullptr)
@@ -857,7 +855,7 @@ int32 UGameInstancedAnimationGraphSubsystem::ResolveCustomDataIndex(const FGameI
 	check(Buckets.IsValidIndex(Rec->BucketIndex));
 
 	const FMeshBucket& Bucket = Buckets[Rec->BucketIndex];
-	const int32* Found = Bucket.CustomDataNameToIndex.Find(ParameterName);
+	const int32* Found = Bucket.MaterialDataNameToIndex.Find(ParameterName);
 	if (!Found)
 	{
 		return INDEX_NONE;
@@ -865,82 +863,82 @@ int32 UGameInstancedAnimationGraphSubsystem::ResolveCustomDataIndex(const FGameI
 	return *Found;
 }
 
-void UGameInstancedAnimationGraphSubsystem::SetInstanceCustomDataFloat(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName, float Value)
+void UGameInstancedAnimationGraphSubsystem::SetMaterialDataFloat(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName, float Value)
 {
-	const int32 Idx = ResolveCustomDataIndex(Handle, ParameterName);
+	const int32 Idx = ResolveMaterialDataIndex(Handle, ParameterName);
 	if (Idx == INDEX_NONE)
 	{
 		return;
 	}
-	SetInstanceCustomDataRange(Handle, Idx, MakeArrayView(&Value, 1));
+	SetMaterialDataRange(Handle, Idx, MakeArrayView(&Value, 1));
 }
 
-void UGameInstancedAnimationGraphSubsystem::SetInstanceCustomDataVector2(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName, FVector2f Value)
+void UGameInstancedAnimationGraphSubsystem::SetMaterialDataVector2(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName, FVector2f Value)
 {
-	const int32 Idx = ResolveCustomDataIndex(Handle, ParameterName);
+	const int32 Idx = ResolveMaterialDataIndex(Handle, ParameterName);
 	if (Idx == INDEX_NONE)
 	{
 		return;
 	}
-	SetInstanceCustomDataRange(Handle, Idx, MakeArrayView(&Value.X, 2));
+	SetMaterialDataRange(Handle, Idx, MakeArrayView(&Value.X, 2));
 }
 
-void UGameInstancedAnimationGraphSubsystem::SetInstanceCustomDataVector3(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName, FVector3f Value)
+void UGameInstancedAnimationGraphSubsystem::SetMaterialDataVector3(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName, FVector3f Value)
 {
-	const int32 Idx = ResolveCustomDataIndex(Handle, ParameterName);
+	const int32 Idx = ResolveMaterialDataIndex(Handle, ParameterName);
 	if (Idx == INDEX_NONE)
 	{
 		return;
 	}
-	SetInstanceCustomDataRange(Handle, Idx, MakeArrayView(&Value.X, 3));
+	SetMaterialDataRange(Handle, Idx, MakeArrayView(&Value.X, 3));
 }
 
-void UGameInstancedAnimationGraphSubsystem::SetInstanceCustomDataColor(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName, FLinearColor Value)
+void UGameInstancedAnimationGraphSubsystem::SetMaterialDataColor(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName, FLinearColor Value)
 {
-	const int32 Idx = ResolveCustomDataIndex(Handle, ParameterName);
+	const int32 Idx = ResolveMaterialDataIndex(Handle, ParameterName);
 	if (Idx == INDEX_NONE)
 	{
 		return;
 	}
-	SetInstanceCustomDataRange(Handle, Idx, MakeArrayView(&Value.R, 4));
+	SetMaterialDataRange(Handle, Idx, MakeArrayView(&Value.R, 4));
 }
 
-float UGameInstancedAnimationGraphSubsystem::GetInstanceCustomDataFloat(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName) const
+float UGameInstancedAnimationGraphSubsystem::GetMaterialDataFloat(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName) const
 {
-	const int32 Idx = ResolveCustomDataIndex(Handle, ParameterName);
+	const int32 Idx = ResolveMaterialDataIndex(Handle, ParameterName);
 	if (Idx == INDEX_NONE) { return 0.f; }
 	int32 N = 0;
-	const float* P = GetInstanceCustomDataPtr(Handle, N);
+	const float* P = GetMaterialDataPtr(Handle, N);
 	check(P && Idx >= 0 && Idx < N);
 	return P[Idx];
 }
 
-FVector2f UGameInstancedAnimationGraphSubsystem::GetInstanceCustomDataVector2(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName) const
+FVector2f UGameInstancedAnimationGraphSubsystem::GetMaterialDataVector2(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName) const
 {
-	const int32 Idx = ResolveCustomDataIndex(Handle, ParameterName);
+	const int32 Idx = ResolveMaterialDataIndex(Handle, ParameterName);
 	if (Idx == INDEX_NONE) { return FVector2f::ZeroVector; }
 	int32 N = 0;
-	const float* P = GetInstanceCustomDataPtr(Handle, N);
+	const float* P = GetMaterialDataPtr(Handle, N);
 	check(P && Idx >= 0 && Idx + 2 <= N);
 	return FVector2f(P[Idx], P[Idx + 1]);
 }
 
-FVector3f UGameInstancedAnimationGraphSubsystem::GetInstanceCustomDataVector3(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName) const
+FVector3f UGameInstancedAnimationGraphSubsystem::GetMaterialDataVector3(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName) const
 {
-	const int32 Idx = ResolveCustomDataIndex(Handle, ParameterName);
+	const int32 Idx = ResolveMaterialDataIndex(Handle, ParameterName);
 	if (Idx == INDEX_NONE) { return FVector3f::ZeroVector; }
 	int32 N = 0;
-	const float* P = GetInstanceCustomDataPtr(Handle, N);
+	const float* P = GetMaterialDataPtr(Handle, N);
 	check(P && Idx >= 0 && Idx + 3 <= N);
 	return FVector3f(P[Idx], P[Idx + 1], P[Idx + 2]);
 }
 
-FLinearColor UGameInstancedAnimationGraphSubsystem::GetInstanceCustomDataColor(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName) const
+FLinearColor UGameInstancedAnimationGraphSubsystem::GetMaterialDataColor(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName) const
 {
-	const int32 Idx = ResolveCustomDataIndex(Handle, ParameterName);
+	const int32 Idx = ResolveMaterialDataIndex(Handle, ParameterName);
 	if (Idx == INDEX_NONE) { return FLinearColor(0, 0, 0, 0); }
 	int32 N = 0;
-	const float* P = GetInstanceCustomDataPtr(Handle, N);
+	const float* P = GetMaterialDataPtr(Handle, N);
 	check(P && Idx >= 0 && Idx + 4 <= N);
 	return FLinearColor(P[Idx], P[Idx + 1], P[Idx + 2], P[Idx + 3]);
 }
@@ -1775,9 +1773,9 @@ void UGameInstancedAnimationGraphSubsystem::GrowMasterBucketAndFollowers(int32 M
 			continue;
 		}
 
-		if (Other.NumCustomDataFloats > 0)
+		if (Other.NumMaterialDataFloats > 0)
 		{
-			Other.CustomDataBySlot.SetNumZeroed((int64)NewCapacity * (int64)Other.NumCustomDataFloats);
+			Other.MaterialDataBySlot.SetNumZeroed((int64)NewCapacity * (int64)Other.NumMaterialDataFloats);
 		}
 		Other.TotalSlotCapacity = NewCapacity;
 		ApplyCapacityToProvider(Other);
@@ -1902,10 +1900,10 @@ void UGameInstancedAnimationGraphSubsystem::CompactAndShrinkMaster(int32 MasterB
 		MasterBucket.TimeSlotIndexBySlot[NewSlot] = MasterBucket.TimeSlotIndexBySlot[OldSlot];
 		MasterBucket.TimeSlotIndexBySlot[OldSlot] = 0;
 
-		if (MasterBucket.NumCustomDataFloats > 0)
+		if (MasterBucket.NumMaterialDataFloats > 0)
 		{
-			const int32 Stride = MasterBucket.NumCustomDataFloats;
-			float* Base = MasterBucket.CustomDataBySlot.GetData();
+			const int32 Stride = MasterBucket.NumMaterialDataFloats;
+			float* Base = MasterBucket.MaterialDataBySlot.GetData();
 			FMemory::Memcpy(Base + (int64)NewSlot * Stride, Base + (int64)OldSlot * Stride, Stride * sizeof(float));
 			FMemory::Memzero(Base + (int64)OldSlot * Stride, Stride * sizeof(float));
 		}
@@ -1996,26 +1994,26 @@ void UGameInstancedAnimationGraphSubsystem::CompactAndShrinkMaster(int32 MasterB
 		MasterBucket.NodeBasePtrsByNode[NodeIdx] = MasterBucket.NodeStorageByNode[NodeIdx].GetData();
 		MasterBucket.NodeParamDirtyBitsByNode[NodeIdx].SetNum(NewCapacity, false);
 	}
-	if (MasterBucket.NumCustomDataFloats > 0)
+	if (MasterBucket.NumMaterialDataFloats > 0)
 	{
-		MasterBucket.CustomDataBySlot.SetNum((int64)NewCapacity * (int64)MasterBucket.NumCustomDataFloats);
+		MasterBucket.MaterialDataBySlot.SetNum((int64)NewCapacity * (int64)MasterBucket.NumMaterialDataFloats);
 	}
 
-	// 4b) Compact + truncate follower bucket CustomDataBySlot (same slot moves apply).
+	// 4b) Compact + truncate follower bucket MaterialDataBySlot (same slot moves apply).
 	for (const int32 FollowerBucketIndex : FollowerBucketIndices)
 	{
 		FMeshBucket& FollowerBucket = Buckets[FollowerBucketIndex];
-		if (FollowerBucket.NumCustomDataFloats > 0)
+		if (FollowerBucket.NumMaterialDataFloats > 0)
 		{
-			const int32 FStride = FollowerBucket.NumCustomDataFloats;
-			float* FBase = FollowerBucket.CustomDataBySlot.GetData();
+			const int32 FStride = FollowerBucket.NumMaterialDataFloats;
+			float* FBase = FollowerBucket.MaterialDataBySlot.GetData();
 			for (int32 i = 0; i < HighLiveSlots.Num(); ++i)
 			{
 				const int32 OldSlot = HighLiveSlots[i];
 				const int32 NewSlot = LowFreeSlots[i];
 				FMemory::Memcpy(FBase + (int64)NewSlot * FStride, FBase + (int64)OldSlot * FStride, FStride * sizeof(float));
 			}
-			FollowerBucket.CustomDataBySlot.SetNum((int64)NewCapacity * (int64)FStride);
+			FollowerBucket.MaterialDataBySlot.SetNum((int64)NewCapacity * (int64)FStride);
 		}
 	}
 
@@ -2254,9 +2252,9 @@ int32 UGameInstancedAnimationGraphSubsystem::FindOrCreateFollowerBucket(
 	Bucket.SharedState->SlotCapacity = MasterCap;
 	Bucket.TotalSlotCapacity = MasterCap;
 
-	if (Bucket.NumCustomDataFloats > 0)
+	if (Bucket.NumMaterialDataFloats > 0)
 	{
-		Bucket.CustomDataBySlot.SetNumZeroed((int64)MasterCap * (int64)Bucket.NumCustomDataFloats);
+		Bucket.MaterialDataBySlot.SetNumZeroed((int64)MasterCap * (int64)Bucket.NumMaterialDataFloats);
 	}
 
 	const int32 NewBucketIndex = Buckets.Add(MoveTemp(Bucket));
@@ -2738,12 +2736,12 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterGpuToCpu(const FGameInst
 	Rec->ISKMC = nullptr;
 	Rec->InstanceId = FPrimitiveInstanceId();
 
-	if (Bucket.NumCustomDataFloats > 0)
+	if (Bucket.NumMaterialDataFloats > 0)
 	{
 		USkeletalMeshComponent* Skinned = IGIAG_ActorInterface::Execute_GetInstancedAnimationSkinnedMesh(Rec->CpuProxyActor);
 		check(Skinned);
-		const float* SlotBase = Bucket.CustomDataBySlot.GetData() + (int64)BucketSlot * (int64)Bucket.NumCustomDataFloats;
-		Skinned->SetCustomPrimitiveDataFloatArray(0, TConstArrayView<float>(SlotBase, Bucket.NumCustomDataFloats));
+		const float* SlotBase = Bucket.MaterialDataBySlot.GetData() + (int64)BucketSlot * (int64)Bucket.NumMaterialDataFloats;
+		Skinned->SetCustomPrimitiveDataFloatArray(0, TConstArrayView<float>(SlotBase, Bucket.NumMaterialDataFloats));
 	}
 
 	// Mark all attachments as CPU-owned (skip GPU attach compute writes).
@@ -2941,10 +2939,10 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterGpuToCpu(const FGameInst
 			if (FollowRec.BucketIndex != INDEX_NONE)
 			{
 				const FMeshBucket& FollowBucket = Buckets[FollowRec.BucketIndex];
-				if (FollowBucket.NumCustomDataFloats > 0)
+				if (FollowBucket.NumMaterialDataFloats > 0)
 				{
-					const float* SlotBase = FollowBucket.CustomDataBySlot.GetData() + (int64)FollowRec.SlotIndex * (int64)FollowBucket.NumCustomDataFloats;
-					FollowRec.CpuFollowSkinnedMesh->SetCustomPrimitiveDataFloatArray(0, TConstArrayView<float>(SlotBase, FollowBucket.NumCustomDataFloats));
+					const float* SlotBase = FollowBucket.MaterialDataBySlot.GetData() + (int64)FollowRec.SlotIndex * (int64)FollowBucket.NumMaterialDataFloats;
+					FollowRec.CpuFollowSkinnedMesh->SetCustomPrimitiveDataFloatArray(0, TConstArrayView<float>(SlotBase, FollowBucket.NumMaterialDataFloats));
 				}
 			}
 		}
@@ -3006,10 +3004,10 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterCpuToGpu(const FGameInst
 			FollowRec.ISKMC = FollowBucket.ISKMC;
 			FollowRec.InstanceId = InstanceId;
 
-			if (FollowBucket.NumCustomDataFloats > 0)
+			if (FollowBucket.NumMaterialDataFloats > 0)
 			{
-				const float* SlotBase = FollowBucket.CustomDataBySlot.GetData() + (int64)MasterBucketSlot * (int64)FollowBucket.NumCustomDataFloats;
-				FollowBucket.ISKMC->SetCustomData(InstanceId, TConstArrayView<float>(SlotBase, FollowBucket.NumCustomDataFloats));
+				const float* SlotBase = FollowBucket.MaterialDataBySlot.GetData() + (int64)MasterBucketSlot * (int64)FollowBucket.NumMaterialDataFloats;
+				FollowBucket.ISKMC->SetCustomData(InstanceId, TConstArrayView<float>(SlotBase, FollowBucket.NumMaterialDataFloats));
 			}
 		}
 	}
@@ -3170,10 +3168,10 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterCpuToGpu(const FGameInst
 	Rec->ISKMC = Bucket.ISKMC;
 	Rec->InstanceId = InstanceId;
 
-	if (Bucket.NumCustomDataFloats > 0)
+	if (Bucket.NumMaterialDataFloats > 0)
 	{
-		const float* SlotBase = Bucket.CustomDataBySlot.GetData() + (int64)MasterBucketSlot * (int64)Bucket.NumCustomDataFloats;
-		Bucket.ISKMC->SetCustomData(InstanceId, TConstArrayView<float>(SlotBase, Bucket.NumCustomDataFloats));
+		const float* SlotBase = Bucket.MaterialDataBySlot.GetData() + (int64)MasterBucketSlot * (int64)Bucket.NumMaterialDataFloats;
+		Bucket.ISKMC->SetCustomData(InstanceId, TConstArrayView<float>(SlotBase, Bucket.NumMaterialDataFloats));
 	}
 
 	if (Bucket.TransformDirty[MasterBucketSlot])

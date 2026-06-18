@@ -287,36 +287,36 @@ public:
 	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim")
 	FTransform GetInstanceTransform(const FGameInstancedAnimationGraphHandle& Handle) const;
 
-	// ---- Per-instance custom data (material parameters) ----
+	// ---- Per-instance material data ----
 
-	void SetInstanceCustomDataRange(const FGameInstancedAnimationGraphHandle& Handle, int32 StartIndex, TConstArrayView<float> Values);
-	const float* GetInstanceCustomDataPtr(const FGameInstancedAnimationGraphHandle& Handle, int32& OutNum) const;
+	void SetMaterialDataRange(const FGameInstancedAnimationGraphHandle& Handle, int32 StartIndex, TConstArrayView<float> Values);
+	const float* GetMaterialDataPtr(const FGameInstancedAnimationGraphHandle& Handle, int32& OutNum) const;
 
-	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|CustomData")
-	void SetInstanceCustomDataFloat(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName, float Value);
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|Material")
+	void SetMaterialDataFloat(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName, float Value);
 
-	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|CustomData")
-	void SetInstanceCustomDataVector2(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName, FVector2f Value);
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|Material")
+	void SetMaterialDataVector2(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName, FVector2f Value);
 
-	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|CustomData")
-	void SetInstanceCustomDataVector3(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName, FVector3f Value);
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|Material")
+	void SetMaterialDataVector3(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName, FVector3f Value);
 
-	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|CustomData")
-	void SetInstanceCustomDataColor(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName, FLinearColor Value);
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|Material")
+	void SetMaterialDataColor(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName, FLinearColor Value);
 
-	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|CustomData")
-	float GetInstanceCustomDataFloat(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName) const;
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|Material")
+	float GetMaterialDataFloat(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName) const;
 
-	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|CustomData")
-	FVector2f GetInstanceCustomDataVector2(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName) const;
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|Material")
+	FVector2f GetMaterialDataVector2(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName) const;
 
-	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|CustomData")
-	FVector3f GetInstanceCustomDataVector3(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName) const;
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|Material")
+	FVector3f GetMaterialDataVector3(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName) const;
 
-	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|CustomData")
-	FLinearColor GetInstanceCustomDataColor(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName) const;
+	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim|Material")
+	FLinearColor GetMaterialDataColor(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName) const;
 
-	int32 ResolveCustomDataIndex(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName) const;
+	int32 ResolveMaterialDataIndex(const FGameInstancedAnimationGraphHandle& Handle, FName ParameterName) const;
 
 	UFUNCTION(BlueprintCallable, Category="GameInstancedAnim")
 	void PlayAnimation(const FGameInstancedAnimationGraphHandle& Handle, const UAnimSequence* AnimSequence, FName NodeName = TEXT("Default"), float BlendDurationSeconds = 0.2f, float StartSeconds = 0.f, bool bLoop = true, float PlayRate = 1.f);
@@ -597,14 +597,14 @@ private:
 		TArray<int32> DirtyNodeIndices;
 
 		// Per-instance custom data float count for this bucket's mesh (0 = no custom data).
-		int32 NumCustomDataFloats = 0;
+		int32 NumMaterialDataFloats = 0;
 
 		// Maps material parameter FName -> start float offset within a slot's custom data.
-		TMap<FName, int32> CustomDataNameToIndex;
+		TMap<FName, int32> MaterialDataNameToIndex;
 
-		// Flat per-slot custom data storage: [SlotIndex * NumCustomDataFloats + FloatOffset].
-		// Sized to TotalSlotCapacity * NumCustomDataFloats. Zero when NumCustomDataFloats == 0.
-		TArray<float> CustomDataBySlot;
+		// Flat per-slot custom data storage: [SlotIndex * NumMaterialDataFloats + FloatOffset].
+		// Sized to TotalSlotCapacity * NumMaterialDataFloats. Zero when NumMaterialDataFloats == 0.
+		TArray<float> MaterialDataBySlot;
 
 		TArray<uint32> GpuAliveSlots;
 		TArray<uint32> CpuAliveSlots;

@@ -4,7 +4,7 @@
 #include "Materials/MaterialParameters.h"
 #include "MaterialCachedData.h"
 
-int32 GIAG::DetectNumCustomDataFloatsFromMaterials(const USkeletalMesh& SkeletalMesh)
+int32 GIAG::DetectNumMaterialDataFloatsFromMaterials(const USkeletalMesh& SkeletalMesh)
 {
 	int32 MaxFloatsNeeded = 0;
 
@@ -38,7 +38,7 @@ int32 GIAG::DetectNumCustomDataFloatsFromMaterials(const USkeletalMesh& Skeletal
 	return FMath::Clamp(MaxFloatsNeeded, 0, (int32)FCustomPrimitiveData::NumCustomPrimitiveDataFloats);
 }
 
-TMap<FName, int32> GIAG::BuildCustomDataIndexMapFromMaterials(const USkeletalMesh& SkeletalMesh)
+TMap<FName, int32> GIAG::BuildMaterialDataIndexMapFromMaterials(const USkeletalMesh& SkeletalMesh)
 {
 	TMap<FName, int32> Result;
 
@@ -66,7 +66,7 @@ TMap<FName, int32> GIAG::BuildCustomDataIndexMapFromMaterials(const USkeletalMes
 						if (const int32* Existing = Result.Find(Info.Name))
 						{
 							ensureMsgf(*Existing == DataIdx,
-								TEXT("GIAG::BuildCustomDataIndexMapFromMaterials: parameter '%s' has conflicting DataIndex (%d vs %d)"),
+								TEXT("GIAG::BuildMaterialDataIndexMapFromMaterials: parameter '%s' has conflicting DataIndex (%d vs %d)"),
 								*Info.Name.ToString(), *Existing, DataIdx);
 						}
 						else
