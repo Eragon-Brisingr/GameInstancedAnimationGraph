@@ -10,5 +10,7 @@ class GAMEINSTANCEDANIMATIONGRAPH_API UGIAG_SkeletonUserData : public UAssetUser
 {
 	GENERATED_BODY()
 public:
+	UPROPERTY(EditAnywhere, Category="GameInstancedAnim")
+	FRotator RootRotationOffset = FRotator::ZeroRotator;
 };
 

@@ -428,6 +428,7 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 	USkeleton* Skeleton = Context.SkeletalMesh->GetSkeleton();
 	check(Skeleton);
 	check(Skeleton->GetReferenceSkeleton().GetNum() == Context.NumBones);
+	const GIAG::FRootRotationOffset RootRotationOffset = GIAG::GetSkeletonRootRotationOffset(Skeleton);
 
 	for (int32 NodeIndexInBatch = 0; NodeIndexInBatch < Context.NodeIndices.Num(); ++NodeIndexInBatch)
 	{
@@ -492,10 +493,13 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 						SecondsPerFrame = UserData->SecondsPerFrame;
 					}
 					EvalAnimSequenceBakedInterpolatedLocalPose(Anim, Playback, SecondsPerFrame, SlotState.Clips[ClipSlot].bLoop != 0u, Skeleton, OutPose);
+					check(OutPose.Num() > 0);
+					RootRotationOffset.Apply(OutPose[0]);
 					return;
 				}
 #endif
-				GIAG::EvalAnimSequenceLocalPose(Anim, WrapOrClampTime(Playback, Len, SlotState.Clips[ClipSlot].bLoop != 0u), Skeleton, OutPose);
+				const float SampleTime = WrapOrClampTime(Playback, Len, SlotState.Clips[ClipSlot].bLoop != 0u);
+				GIAG::EvalAnimSequenceVisualLocalPose(Anim, SampleTime, Skeleton, OutPose, RootRotationOffset);
 			};
 
 			// Step 2) Fast-path: a single clip contributes -> evaluate just that clip and write directly.
