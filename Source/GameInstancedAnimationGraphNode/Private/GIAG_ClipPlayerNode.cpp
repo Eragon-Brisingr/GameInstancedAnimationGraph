@@ -336,6 +336,7 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 	USkeleton* Skeleton = Context.SkeletalMesh->GetSkeleton();
 	check(Skeleton);
 	check(Skeleton->GetReferenceSkeleton().GetNum() == Context.NumBones);
+	const GIAG::FRootRotationOffset RootRotationOffset = GIAG::GetSkeletonRootRotationOffset(Skeleton);
 
 	for (int32 NodeIndexInBatch = 0; NodeIndexInBatch < Context.NodeIndices.Num(); ++NodeIndexInBatch)
 	{
@@ -414,7 +415,7 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 
 				TArray<FTransform> Pose;
 				const float SampleTime = ComputeSampleTimeSeconds(Anim, 0u);
-				GIAG::EvalAnimSequenceLocalPose(Anim, SampleTime, Skeleton, Pose);
+				GIAG::EvalAnimSequenceVisualLocalPose(Anim, SampleTime, Skeleton, Pose, RootRotationOffset);
 				check(Pose.Num() == Context.NumBones);
 				for (int32 BoneIndex = 0; BoneIndex < Context.NumBones; ++BoneIndex)
 				{
@@ -429,7 +430,7 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 
 				TArray<FTransform> Pose;
 				const float SampleTime = ComputeSampleTimeSeconds(Anim, 1u);
-				GIAG::EvalAnimSequenceLocalPose(Anim, SampleTime, Skeleton, Pose);
+				GIAG::EvalAnimSequenceVisualLocalPose(Anim, SampleTime, Skeleton, Pose, RootRotationOffset);
 				check(Pose.Num() == Context.NumBones);
 				for (int32 BoneIndex = 0; BoneIndex < Context.NumBones; ++BoneIndex)
 				{
@@ -444,7 +445,7 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 
 				TArray<FTransform> Pose;
 				const float SampleTime = ComputeSampleTimeSeconds(Anim, 2u);
-				GIAG::EvalAnimSequenceLocalPose(Anim, SampleTime, Skeleton, Pose);
+				GIAG::EvalAnimSequenceVisualLocalPose(Anim, SampleTime, Skeleton, Pose, RootRotationOffset);
 				check(Pose.Num() == Context.NumBones);
 				for (int32 BoneIndex = 0; BoneIndex < Context.NumBones; ++BoneIndex)
 				{
@@ -459,7 +460,7 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 
 				TArray<FTransform> Pose;
 				const float SampleTime = ComputeSampleTimeSeconds(Anim, 3u);
-				GIAG::EvalAnimSequenceLocalPose(Anim, SampleTime, Skeleton, Pose);
+				GIAG::EvalAnimSequenceVisualLocalPose(Anim, SampleTime, Skeleton, Pose, RootRotationOffset);
 				check(Pose.Num() == Context.NumBones);
 				for (int32 BoneIndex = 0; BoneIndex < Context.NumBones; ++BoneIndex)
 				{
@@ -478,7 +479,7 @@ void FGIAG_ClipPlayerNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& 
 				check(Anim->GetSkeleton() == Skeleton);
 
 				const float SampleTime = ComputeSampleTimeSeconds(Anim, ClipSlot);
-				GIAG::EvalAnimSequenceLocalPose(Anim, SampleTime, Skeleton, ClipPose[ClipSlot]);
+				GIAG::EvalAnimSequenceVisualLocalPose(Anim, SampleTime, Skeleton, ClipPose[ClipSlot], RootRotationOffset);
 				check(ClipPose[ClipSlot].Num() == Context.NumBones);
 				bHasPose[ClipSlot] = true;
 			};

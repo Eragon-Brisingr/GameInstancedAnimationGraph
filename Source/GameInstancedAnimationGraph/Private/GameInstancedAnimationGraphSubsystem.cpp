@@ -905,6 +905,7 @@ namespace
 		check(RefPose.Num() == NumBones);
 
 		OutRefPoseLocal = RefPose;
+		GIAG::ApplySkeletonRootRotationOffset(Skeleton, OutRefPoseLocal[0]);
 
 		OutRefPoseLocalTRS = MakeShared<TArray<FGIAG_BoneTRS>>();
 		OutRefPoseLocalTRS->SetNumUninitialized(NumBones);
@@ -958,10 +959,11 @@ bool UGameInstancedAnimationGraphSubsystem::GetOrBuildAnimSequencePixels(
 	OutTRS.SetNumZeroed(NumFrames * NumBones);
 
 	TArray<FTransform> LocalPose;
+	const GIAG::FRootRotationOffset RootRotationOffset = GIAG::GetSkeletonRootRotationOffset(Skeleton);
 	for (int32 Frame = 0; Frame < NumFrames; ++Frame)
 	{
 		const float Time = FMath::Min(Frame * SPF, Len);
-		if (!GIAG::EvalAnimSequenceLocalPose(AnimSequence, Time, Skeleton, LocalPose))
+		if (!GIAG::EvalAnimSequenceVisualLocalPose(AnimSequence, Time, Skeleton, LocalPose, RootRotationOffset))
 		{
 			return false;
 		}
@@ -1282,9 +1284,9 @@ int32 UGameInstancedAnimationGraphSubsystem::RequestClipBake(int32 GroupIndex, c
 		return INDEX_NONE;
 	}
 
-	auto StartBakeTask = [](USkeleton* Skeleton, const UAnimSequence* Anim, float SPF, float Len, int32 NumFrames, int32 NumBonesLocal, const FClipBakePayloadPtr& BakePayload)
+	auto StartBakeTask = [](USkeleton* Skeleton, const UAnimSequence* Anim, float SPF, float Len, int32 NumFrames, int32 NumBonesLocal, const GIAG::FRootRotationOffset RootRotationOffset, const FClipBakePayloadPtr& BakePayload)
 	{
-		Async(EAsyncExecution::ThreadPool, [Skeleton, Anim, SPF, Len, NumFrames, NumBonesLocal, BakePayload]()
+		Async(EAsyncExecution::ThreadPool, [Skeleton, Anim, SPF, Len, NumFrames, NumBonesLocal, RootRotationOffset, BakePayload]()
 		{
 			if (!BakePayload.IsValid())
 			{
@@ -1320,7 +1322,7 @@ int32 UGameInstancedAnimationGraphSubsystem::RequestClipBake(int32 GroupIndex, c
 			for (int32 Frame = 0; Frame < NumFrames; ++Frame)
 			{
 				const float Time = FMath::Min(Frame * SPF, Len);
-				if (!GIAG::EvalAnimSequenceLocalPose(Anim, Time, Skeleton, LocalPose))
+				if (!GIAG::EvalAnimSequenceVisualLocalPose(Anim, Time, Skeleton, LocalPose, RootRotationOffset))
 				{
 					BakePayload->bCancelled.Store(true);
 					break;
@@ -1473,7 +1475,8 @@ int32 UGameInstancedAnimationGraphSubsystem::RequestClipBake(int32 GroupIndex, c
 	Slot.Bake->TRS = MakeShared<TArray<FGIAG_BoneTRS>>();
 	Slot.Bake->TRS->SetNumZeroed(NumTransforms);
 
-	StartBakeTask(Group.Skeleton, AnimSequence, SPF, Len, NumFrames, NumBones, Slot.Bake);
+	const GIAG::FRootRotationOffset RootRotationOffset = GIAG::GetSkeletonRootRotationOffset(Group.Skeleton);
+	StartBakeTask(Group.Skeleton, AnimSequence, SPF, Len, NumFrames, NumBones, RootRotationOffset, Slot.Bake);
 
 	return ClipIndex;
 }
