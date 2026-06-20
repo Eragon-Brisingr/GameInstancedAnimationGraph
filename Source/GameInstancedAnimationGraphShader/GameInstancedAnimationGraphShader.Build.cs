@@ -19,7 +19,6 @@ public class GameInstancedAnimationGraphShader : ModuleRules
 			new string[]
 			{
 				"CoreUObject",
-				"DerivedDataCache",
 				"RenderCore",
 				"RHI",
 				"Renderer",
@@ -28,6 +27,11 @@ public class GameInstancedAnimationGraphShader : ModuleRules
 				"HierarchyTableRuntime",
 				"HierarchyTableAnimationRuntime",
 			});
+
+		if (Target.bBuildEditor)
+		{
+			PrivateDependencyModuleNames.Add("DerivedDataCache");
+		}
 
 		// Needed for FShaderSerializeContext (RenderCore internal header).
 		PrivateIncludePaths.Add(Path.Combine(EngineDirectory, "Source/Runtime/RenderCore/Internal"));

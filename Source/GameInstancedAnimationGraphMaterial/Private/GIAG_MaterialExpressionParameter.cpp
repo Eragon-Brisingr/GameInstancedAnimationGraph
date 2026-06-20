@@ -41,7 +41,7 @@ void UGIAG_MaterialExpressionParameterBase::PatchPerInstanceCustomDataFlag(UMate
 void UGIAG_MaterialExpressionParameterBase::PostLoad()
 {
 	Super::PostLoad();
-	PatchPerInstanceCustomDataFlag(Cast<UMaterialInterface>(GetOuter()));
+	PatchPerInstanceCustomDataFlag(GetTypedOuter<UMaterialInterface>());
 }
 
 #if WITH_EDITOR

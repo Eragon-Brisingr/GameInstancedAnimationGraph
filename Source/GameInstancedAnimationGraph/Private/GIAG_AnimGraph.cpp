@@ -923,11 +923,11 @@ void UGIAG_AnimGraph::PostEditChangeProperty(FPropertyChangedEvent& PropertyChan
 	
 	bCompiled = false;
 	Compiled = {};
+	CookedGraphCullShaderMapsForCooking.Reset();
 }
 
-void UGIAG_AnimGraph::BeginCacheForCookedPlatformData(const ITargetPlatform* TargetPlatform)
+void UGIAG_AnimGraph::BuildCookedGraphCullShaderMaps(const ITargetPlatform* TargetPlatform, TArray<FCookedGraphCullShaderMapEntry>& OutEntries)
 {
-	Super::BeginCacheForCookedPlatformData(TargetPlatform);
 	check(TargetPlatform);
 
 	// Ensure graph topology is compiled (deterministic) and we have a stable GraphHash / symbol list.
@@ -936,7 +936,7 @@ void UGIAG_AnimGraph::BeginCacheForCookedPlatformData(const ITargetPlatform* Tar
 	// If node culling is disabled (or no supported cull nodes), there is nothing to cook.
 	if (!NeedsGraphCullCookData(Compiled))
 	{
-		CookedGraphCullShaderMaps.Reset();
+		OutEntries.Reset();
 		return;
 	}
 
@@ -951,8 +951,8 @@ void UGIAG_AnimGraph::BeginCacheForCookedPlatformData(const ITargetPlatform* Tar
 	TArray<FName> ShaderFormats;
 	TargetPlatform->GetAllTargetedShaderFormats(ShaderFormats);
 
-	CookedGraphCullShaderMaps.Reset();
-	CookedGraphCullShaderMaps.Reserve(ShaderFormats.Num());
+	OutEntries.Reset();
+	OutEntries.Reserve(ShaderFormats.Num());
 
 	for (const FName Format : ShaderFormats)
 	{
@@ -969,29 +969,72 @@ void UGIAG_AnimGraph::BeginCacheForCookedPlatformData(const ITargetPlatform* Tar
 			/*bAllowCompile=*/true);
 		checkf(ShaderMap.IsValid(), TEXT("GIAG: failed to cook GraphCull ShaderMap (Format=%s AnimGraph=%s)."), *Format.ToString(), *GetPathName());
 
-		ShaderMap->AssociateWithAsset(FName(*GetPathName()));
+		ShaderMap->AssociateWithAsset(GetOutermost()->GetFName());
 
 		FCookedGraphCullShaderMapEntry Entry;
 		Entry.ShaderFormat = Format;
 		Entry.ShaderMap = FGIAG_GraphCullShaderMapPtr(ShaderMap.GetReference());
-		CookedGraphCullShaderMaps.Add(MoveTemp(Entry));
+		OutEntries.Add(MoveTemp(Entry));
 	}
+}
+
+bool UGIAG_AnimGraph::HasCookedGraphCullShaderMapsForTarget(const ITargetPlatform* TargetPlatform) const
+{
+	check(TargetPlatform);
+
+	const TArray<FCookedGraphCullShaderMapEntry>* Entries = CookedGraphCullShaderMapsForCooking.Find(TargetPlatform);
+	if (Entries == nullptr)
+	{
+		return false;
+	}
+
+	TArray<FName> ShaderFormats;
+	TargetPlatform->GetAllTargetedShaderFormats(ShaderFormats);
+	for (const FName Format : ShaderFormats)
+	{
+		if (ShaderFormatToLegacyShaderPlatform(Format) == SP_NumPlatforms)
+		{
+			continue;
+		}
+
+		const FCookedGraphCullShaderMapEntry* Entry = Entries->FindByPredicate(
+			[Format](const FCookedGraphCullShaderMapEntry& Candidate)
+			{
+				return Candidate.ShaderFormat == Format && Candidate.ShaderMap.IsValid();
+			});
+		if (Entry == nullptr)
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+void UGIAG_AnimGraph::BeginCacheForCookedPlatformData(const ITargetPlatform* TargetPlatform)
+{
+	Super::BeginCacheForCookedPlatformData(TargetPlatform);
+	check(TargetPlatform);
+
+	BuildCookedGraphCullShaderMaps(TargetPlatform, CookedGraphCullShaderMapsForCooking.FindOrAdd(TargetPlatform));
 }
 
 void UGIAG_AnimGraph::ClearCachedCookedPlatformData(const ITargetPlatform* TargetPlatform)
 {
 	Super::ClearCachedCookedPlatformData(TargetPlatform);
-	CookedGraphCullShaderMaps.Reset();
+	CookedGraphCullShaderMapsForCooking.Remove(TargetPlatform);
 }
 
 bool UGIAG_AnimGraph::IsCachedCookedPlatformDataLoaded(const ITargetPlatform* TargetPlatform)
 {
+	check(TargetPlatform);
+
 	Compile();
 	if (!NeedsGraphCullCookData(Compiled))
 	{
 		return true;
 	}
-	return CookedGraphCullShaderMaps.Num() > 0;
+	return HasCookedGraphCullShaderMapsForTarget(TargetPlatform);
 }
 #endif // WITH_EDITOR
 
@@ -999,17 +1042,43 @@ void UGIAG_AnimGraph::Serialize(FArchive& Ar)
 {
 	Super::Serialize(Ar);
 
-	int32 NumEntries = CookedGraphCullShaderMaps.Num();
+	TArray<FCookedGraphCullShaderMapEntry>* EntriesToSerialize = &CookedGraphCullShaderMaps;
+	int32 NumEntries = 0;
 
-	Ar << NumEntries;
 	if (Ar.IsLoading())
 	{
+		Ar << NumEntries;
 		CookedGraphCullShaderMaps.SetNum(NumEntries);
+	}
+	else
+	{
+#if WITH_EDITOR
+		if (Ar.IsCooking())
+		{
+			check(Ar.CookingTarget());
+			EntriesToSerialize = &CookedGraphCullShaderMapsForCooking.FindOrAdd(Ar.CookingTarget());
+			if (!HasCookedGraphCullShaderMapsForTarget(Ar.CookingTarget()))
+			{
+				BuildCookedGraphCullShaderMaps(Ar.CookingTarget(), *EntriesToSerialize);
+			}
+			NumEntries = EntriesToSerialize->Num();
+		}
+		else
+		{
+			// Cooked GraphCull ShaderMaps are derived data and should not be written to editor assets.
+			EntriesToSerialize = nullptr;
+			NumEntries = 0;
+		}
+#else
+		NumEntries = CookedGraphCullShaderMaps.Num();
+#endif
+		Ar << NumEntries;
 	}
 
 	for (int32 i = 0; i < NumEntries; ++i)
 	{
-		FCookedGraphCullShaderMapEntry& Entry = CookedGraphCullShaderMaps[i];
+		check(EntriesToSerialize);
+		FCookedGraphCullShaderMapEntry& Entry = (*EntriesToSerialize)[i];
 		Ar << Entry.ShaderFormat;
 
 		bool bHasMap = Entry.ShaderMap.IsValid();
@@ -1025,7 +1094,7 @@ void UGIAG_AnimGraph::Serialize(FArchive& Ar)
 			const bool bOk = GIAG::GIAG_SerializeShaderMap(
 				Ar,
 				*Entry.ShaderMap,
-				FName(*GetPathName()),
+				GetOutermost()->GetFName(),
 				FPlatformProperties::RequiresCookedData());
 			if (Ar.IsSaving())
 			{

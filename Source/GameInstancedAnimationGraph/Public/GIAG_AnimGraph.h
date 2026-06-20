@@ -235,12 +235,22 @@ private:
 		FGIAG_GraphCullShaderMapPtr ShaderMap;
 	};
 
+#if WITH_EDITOR
+	void BuildCookedGraphCullShaderMaps(const ITargetPlatform* TargetPlatform, TArray<FCookedGraphCullShaderMapEntry>& OutEntries);
+	bool HasCookedGraphCullShaderMapsForTarget(const ITargetPlatform* TargetPlatform) const;
+#endif
+
 	bool bCompiled = false;
 
 	FGIAG_AnimGraphCompiledData Compiled;
 
-	// Cooked per-platform GraphCull ShaderMaps (serialized into the asset; loaded at runtime from ShaderCodeLibrary).
+	// Cooked GraphCull ShaderMaps loaded from cooked asset data for the running shader formats.
 	TArray<FCookedGraphCullShaderMapEntry> CookedGraphCullShaderMaps;
+
+#if WITH_EDITOR
+	// Cook-time GraphCull ShaderMaps keyed by the cook target. Serialize writes only Ar.CookingTarget().
+	TMap<const ITargetPlatform*, TArray<FCookedGraphCullShaderMapEntry>> CookedGraphCullShaderMapsForCooking;
+#endif
 };
 
 
