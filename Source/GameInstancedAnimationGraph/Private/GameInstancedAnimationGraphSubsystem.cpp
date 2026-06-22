@@ -417,6 +417,8 @@ void UGameInstancedAnimationGraphSubsystem::Initialize(FSubsystemCollectionBase&
 
 	// Precompute CPU pose cache before Actor/Component ticks (Anim BP evaluation happens later).
 	PreActorTickHandle = FWorldDelegates::OnWorldPreActorTick.AddUObject(this, &ThisClass::OnWorldPreActorTick);
+	// Re-clear motion vectors for GPU->CPU switched leaders after actor ticks, before the render flush.
+	PostActorTickHandle = FWorldDelegates::OnWorldPostActorTick.AddUObject(this, &ThisClass::OnWorldPostActorTick);
 
 	DefaultStaticMeshAttachmentNiagaraSystem = GetDefault<UGameInstancedAnimationGraphSettings>()->GlobalStaticMeshAttachNiagaraSystem.LoadSynchronous();
 }
@@ -428,6 +430,13 @@ void UGameInstancedAnimationGraphSubsystem::Deinitialize()
 		FWorldDelegates::OnWorldPreActorTick.Remove(PreActorTickHandle);
 		PreActorTickHandle.Reset();
 	}
+
+	if (PostActorTickHandle.IsValid())
+	{
+		FWorldDelegates::OnWorldPostActorTick.Remove(PostActorTickHandle);
+		PostActorTickHandle.Reset();
+	}
+	PendingFollowerMotionVectorClears.Reset();
 
 	SharedResourcesByKey.Reset();
 	SharedResourceBus.Reset();
@@ -453,6 +462,34 @@ void UGameInstancedAnimationGraphSubsystem::OnWorldPreActorTick(UWorld* World, E
 	// Flush deferred Niagara attach meta to RT early in the frame so Niagara ticks can observe updated versions.
 	FlushNiagaraAttachBuckets_GameThread();
 	PrecomputeCpuPoseCache_GameThread();
+}
+
+void UGameInstancedAnimationGraphSubsystem::OnWorldPostActorTick(UWorld* World, ELevelTick /*TickType*/, float /*DeltaSeconds*/)
+{
+	if (World != GetWorld())
+	{
+		return;
+	}
+
+	// Runs after all actor ticks (so the leader's own RefreshBoneTransforms has already reset its bone
+	// revision back to "moving") but before the end-of-frame skeletal render flush. Re-clearing here keeps
+	// the leader's revision reading as "cleared" at flush time, which its LeaderPose followers inherit and
+	// which is the only thing that suppresses their first-frame ref-pose->live velocity smear. We hold it
+	// for a few frames until each follower's previous bone buffer has been written with the live pose.
+	static constexpr int32 FollowerMotionVectorClearFrames = 2;
+	for (auto It = PendingFollowerMotionVectorClears.CreateIterator(); It; ++It)
+	{
+		USkeletalMeshComponent* Leader = It->Key.Get();
+		if (Leader)
+		{
+			Leader->ClearMotionVector();
+		}
+		It->Value += 1;
+		if (!Leader || It->Value >= FollowerMotionVectorClearFrames)
+		{
+			It.RemoveCurrent();
+		}
+	}
 }
 
 void UGameInstancedAnimationGraphSubsystem::PrecomputeCpuPoseCache_GameThread()
@@ -2948,6 +2985,7 @@ void UGameInstancedAnimationGraphSubsystem::SwitchMasterGpuToCpu(const FGameInst
 				}
 			}
 		}
+		PendingFollowerMotionVectorClears.Add(Leader);
 	}
 
 	UpdateCpuAttachSyncRegistration_GameThread(Handle.RecordIndex);
@@ -4544,6 +4582,7 @@ void UGameInstancedAnimationGraphSubsystem::Tick(float DeltaTime)
 			const auto& ActiveIndices = Bucket.GpuActiveInstanceIndices;
 			DebugTotalActive = ActiveIndices.Num();
 
+			TArray<uint32> ReenteredActiveSlots;
 			if (Bucket.DirtyTransformSlots.Num() > 0 || Bucket.NewSlotsThisTick.Num() > 0)
 			{
 				bHasTransformDirty = true;
@@ -4561,6 +4600,14 @@ void UGameInstancedAnimationGraphSubsystem::Tick(float DeltaTime)
 
 				if (Bucket.NewSlotsThisTick.Num() > 0)
 				{
+					const TSet<uint32> ReenteredSet(Bucket.NewSlotsThisTick);
+					for (const uint32 SlotU : ActiveIndices)
+					{
+						if (ReenteredSet.Contains(SlotU))
+						{
+							ReenteredActiveSlots.Add(SlotU);
+						}
+					}
 					Bucket.NewSlotsThisTick.Reset();
 				}
 			}
@@ -4586,6 +4633,7 @@ void UGameInstancedAnimationGraphSubsystem::Tick(float DeltaTime)
 			Params.ParentIndices = &Cache->ParentIndices;
 			Params.InverseRefPoseTRS = &Cache->InverseRefPoseTRS;
 			Params.ActiveInstanceIndices = ActiveIndices;
+			Params.ReenteredSlots = MoveTemp(ReenteredActiveSlots);
 
 			// Debug readback requests (bucket SlotIndex values).
 			if (DebugReadbackEnabledSerialByRecordIndex.Num() > 0 || DebugNeedNodeBitsReadbackEnabledSerialByRecordIndex.Num() > 0)

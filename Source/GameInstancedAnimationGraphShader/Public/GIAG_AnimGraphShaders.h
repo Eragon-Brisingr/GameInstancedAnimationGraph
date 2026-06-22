@@ -62,6 +62,27 @@ namespace GIAG
 
 	GAMEINSTANCEDANIMATIONGRAPHSHADER_API void AddPoseToTransformBufferPasses(FRDGBuilder& GraphBuilder, const FPoseToTransformBufferPassParams& Params);
 
+	/**
+	 * Copy the Current bone-transform region -> Previous region for a specific set of slots that just
+	 * (re)entered GPU evaluation this frame (CPU->GPU switch / fresh add). Collapses the one-frame
+	 * velocity spike from the slot's stale Previous region to zero, per-slot, leaving every other
+	 * instance's motion blur intact. Run AFTER the master/follower pose->TransformBuffer pass.
+	 */
+	struct FPrimePreviousTransformsPassParams
+	{
+		uint32 NumSlots = 0;
+		uint32 NumBones = 0;
+		/** Engine-side per-animation-slot transform stride for this bucket (= GetMaxBoneTransformCount()). */
+		uint32 MaxTransformCount = 0;
+		/** Current region byte offset (source) and Previous region byte offset (destination) for this bucket. */
+		uint32 BaseTransformOffset = 0;
+		uint32 BasePreviousTransformOffset = 0;
+		FRDGBufferSRVRef SlotIndices = nullptr; // StructuredBuffer<uint>, size = NumSlots
+		FRDGBufferRef TransformBuffer = nullptr;
+	};
+
+	GAMEINSTANCEDANIMATIONGRAPHSHADER_API void AddPrimePreviousTransformsPasses(FRDGBuilder& GraphBuilder, const FPrimePreviousTransformsPassParams& Params);
+
 	struct FPoseSpaceConvertPassParams
 	{
 		uint32 NumBones = 0;

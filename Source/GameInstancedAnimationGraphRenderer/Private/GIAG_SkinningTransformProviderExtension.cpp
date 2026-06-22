@@ -594,6 +594,9 @@ struct FFollowerGroupData
 	const uint32* BoneRemap = nullptr;
 	// Per-DstIndex destination byte offset in TransformBuffer (Cur, plus Prev when EDirtyBoneTransforms::Previous fires).
 	TArray<uint32> DstInfos;
+	// Cur/Prev region byte offsets for this follower bucket (used to prime Prev=Cur for re-entered slots).
+	uint32 CurrentTransformOffset = 0;
+	uint32 PreviousTransformOffset = 0;
 };
 
 void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransformProvider::FProviderContext& Context)
@@ -840,6 +843,8 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 			Group.SrcNumBones = Data.SrcNumBones;
 			Group.BoneRemap = Data.BoneRemap;
 			Group.MaxTransformCount = SceneProxy->GetMaxBoneTransformCount();
+			Group.CurrentTransformOffset = Ind.CurrentTransformOffset;
+			Group.PreviousTransformOffset = Ind.PreviousTransformOffset;
 			// Always write Current. Append a Previous DstInfo (Prev = Current) only when the engine flags
 			// EDirtyBoneTransforms::Previous (first frame / re-bind); otherwise the engine's per-frame
 			// Cur/Prev region rotation already places last frame's Cur at PreviousTransformOffset.
@@ -1295,6 +1300,22 @@ void FGIAG_SkinningTransformProviderExtension::ProvideTransforms(FSkinningTransf
 				FollowParams.TransformBuffer = Context.TransformBuffer;
 				FollowParams.DebugName = FollowKey.FollowMeshName;
 				GIAG::AddFollowerPoseToTransformBufferPasses(Context.GraphBuilder, FollowParams);
+
+				// Followers re-enter GPU at the same slot indices as their master, so reuse the master's
+				// re-entered-slot list to prime this follower bucket's Previous region = Current. Without
+				// this the follower smears for one frame on CPU->GPU switch (its Prev region is stale).
+				if (Outputs.ReenteredSlotsSRV != nullptr && Outputs.NumReenteredSlots > 0)
+				{
+					GIAG::FPrimePreviousTransformsPassParams PrimeParams;
+					PrimeParams.NumSlots = Outputs.NumReenteredSlots;
+					PrimeParams.NumBones = FollowGroup.NumBones;
+					PrimeParams.MaxTransformCount = FollowGroup.MaxTransformCount;
+					PrimeParams.BaseTransformOffset = FollowGroup.CurrentTransformOffset;
+					PrimeParams.BasePreviousTransformOffset = FollowGroup.PreviousTransformOffset;
+					PrimeParams.SlotIndices = Outputs.ReenteredSlotsSRV;
+					PrimeParams.TransformBuffer = Context.TransformBuffer;
+					GIAG::AddPrimePreviousTransformsPasses(Context.GraphBuilder, PrimeParams);
+				}
 			}
 		}
 	}

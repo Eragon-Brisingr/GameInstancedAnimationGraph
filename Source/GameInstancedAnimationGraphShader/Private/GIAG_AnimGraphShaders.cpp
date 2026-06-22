@@ -145,6 +145,34 @@ namespace
 	};
 	IMPLEMENT_GLOBAL_SHADER(FGIAG_BucketCompactionCS, "/GameInstancedAnimationGraphShader/GIAG_BucketCompaction_CS.usf", "Main", SF_Compute);
 
+	class FGIAG_PrimePreviousTransformsCS : public FGlobalShader
+	{
+	public:
+		DECLARE_GLOBAL_SHADER(FGIAG_PrimePreviousTransformsCS);
+		SHADER_USE_PARAMETER_STRUCT(FGIAG_PrimePreviousTransformsCS, FGlobalShader);
+
+		BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+			SHADER_PARAMETER(uint32, NumSlots)
+			SHADER_PARAMETER(uint32, NumBones)
+			SHADER_PARAMETER(uint32, MaxTransformCount)
+			SHADER_PARAMETER(uint32, BaseTransformOffset)
+			SHADER_PARAMETER(uint32, BasePreviousTransformOffset)
+			SHADER_PARAMETER(uint32, DispatchGroupCountX)
+			SHADER_PARAMETER(uint32, DispatchGroupCountY)
+			SHADER_PARAMETER(uint32, DispatchGroupOffset)
+			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint32>, SlotIndices)
+			SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<FVector4f>, TransformBuffer)
+			SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<FVector4f>, RW_TransformBuffer)
+		END_SHADER_PARAMETER_STRUCT()
+
+		static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters) { return true; }
+		static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+		{
+			FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		}
+	};
+	IMPLEMENT_GLOBAL_SHADER(FGIAG_PrimePreviousTransformsCS, "/GameInstancedAnimationGraphShader/GIAG_PrimePreviousTransforms_CS.usf", "Main", SF_Compute);
+
 	class FGIAG_AttachToTransformBufferCS : public FGlobalShader
 	{
 	public:
@@ -536,6 +564,47 @@ namespace GIAG
 
 			GraphBuilder.AddPass(
 				RDG_EVENT_NAME("GIAG_BucketCompaction (%u moves)", Params.NumMoves),
+				ShaderParams,
+				ERDGPassFlags::Compute,
+				[ShaderParams, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
+				{
+					FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *ShaderParams, GroupCount);
+				});
+		});
+	}
+
+	void AddPrimePreviousTransformsPasses(FRDGBuilder& GraphBuilder, const FPrimePreviousTransformsPassParams& Params)
+	{
+		if (Params.NumSlots == 0 || Params.NumBones == 0 || Params.MaxTransformCount == 0
+			|| Params.SlotIndices == nullptr || Params.TransformBuffer == nullptr)
+		{
+			return;
+		}
+
+		TShaderMapRef<FGIAG_PrimePreviousTransformsCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+
+		constexpr int32 ThreadsPerGroup = 64;
+		const int64 TotalWorkItems = (int64)Params.NumSlots * (int64)Params.NumBones;
+		GIAG::RDGDispatchTiling::ForEachChunk(
+			TotalWorkItems,
+			ThreadsPerGroup,
+			[&](int32 /*ChunkGroups1D*/, int32 GroupOffset1D, const FIntVector& GroupCount)
+		{
+			auto* ShaderParams = GraphBuilder.AllocParameters<FGIAG_PrimePreviousTransformsCS::FParameters>();
+			ShaderParams->NumSlots                   = Params.NumSlots;
+			ShaderParams->NumBones                   = Params.NumBones;
+			ShaderParams->MaxTransformCount          = Params.MaxTransformCount;
+			ShaderParams->BaseTransformOffset        = Params.BaseTransformOffset;
+			ShaderParams->BasePreviousTransformOffset = Params.BasePreviousTransformOffset;
+			ShaderParams->DispatchGroupCountX        = (uint32)GroupCount.X;
+			ShaderParams->DispatchGroupCountY        = (uint32)GroupCount.Y;
+			ShaderParams->DispatchGroupOffset        = (uint32)GroupOffset1D;
+			ShaderParams->SlotIndices                = Params.SlotIndices;
+			ShaderParams->TransformBuffer            = GetCompressedBoneTransformSRV(GraphBuilder, Params.TransformBuffer);
+			ShaderParams->RW_TransformBuffer         = GetCompressedBoneTransformUAV(GraphBuilder, Params.TransformBuffer);
+
+			GraphBuilder.AddPass(
+				RDG_EVENT_NAME("GIAG_PrimePreviousTransforms (%u slots)", Params.NumSlots),
 				ShaderParams,
 				ERDGPassFlags::Compute,
 				[ShaderParams, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)

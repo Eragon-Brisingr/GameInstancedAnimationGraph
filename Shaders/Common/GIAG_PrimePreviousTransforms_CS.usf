@@ -1,0 +1,48 @@
+// Prime the Previous transform region = Current for a set of slots that just (re)entered GPU
+// evaluation this frame (CPU->GPU switch, or fresh GPU add). UE 5.8 alternates Cur/Prev regions per
+// frame, so a re-entered slot's Prev region holds whatever stale pose was last written before it left
+// GPU mode -> a one-frame velocity spike. Copying Current -> Previous for just these slots collapses
+// that to zero velocity, per-slot, without disturbing the motion blur of any other instance.
+//
+// Run AFTER the main pose->TransformBuffer pass (which writes Current). Mirrors that pass's addressing:
+//   InRegionIndex = (Slot * 2) * MaxTransformCount + BoneIndex, with separate Cur/Prev base byte offsets.
+
+#include "/Engine/Public/Platform.ush"
+#include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
+
+uint NumSlots;
+uint NumBones;
+uint MaxTransformCount;
+uint BaseTransformOffset;          // Current region byte offset (source)
+uint BasePreviousTransformOffset;  // Previous region byte offset (destination)
+
+uint DispatchGroupCountX;
+uint DispatchGroupCountY;
+uint DispatchGroupOffset;
+
+StructuredBuffer<uint> SlotIndices; // slot indices to prime (size = NumSlots)
+
+Buffer<float4>   TransformBuffer;
+RWBuffer<float4> RW_TransformBuffer;
+
+[numthreads(64, 1, 1)]
+void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	const uint GroupLinear = DispatchGroupOffset + GroupId.x + GroupId.y * DispatchGroupCountX + GroupId.z * (DispatchGroupCountX * DispatchGroupCountY);
+	const uint DispatchId = GroupLinear * 64u + GroupIndex;
+
+	const uint Total = NumSlots * NumBones;
+	if (DispatchId >= Total)
+	{
+		return;
+	}
+
+	const uint SlotListIdx = DispatchId / NumBones;
+	const uint BoneIndex   = DispatchId - SlotListIdx * NumBones;
+	const uint Slot        = SlotIndices[SlotListIdx];
+
+	const uint InRegionIndex = (Slot * 2u) * MaxTransformCount + BoneIndex;
+
+	const float4x3 CurrentXform = GIAG_LoadCompressedBoneTransform(TransformBuffer, BaseTransformOffset, InRegionIndex);
+	GIAG_StoreCompressedBoneTransform(RW_TransformBuffer, BasePreviousTransformOffset, InRegionIndex, CurrentXform);
+}

@@ -255,6 +255,12 @@ struct FGIAG_AnimGraphRunParams
 	/** Engine-side per-animation-slot transform stride
 	 *  (= FSkinningSceneExtensionProxy::GetMaxBoneTransformCount()). May differ from NumBones. */
 	uint32 MaxTransformCount = 0;
+
+	/** Slots that just (re)entered GPU evaluation this frame (CPU->GPU switch / fresh add). After the
+	 *  pose->TransformBuffer pass writes Current, these slots get Previous = Current so their stale
+	 *  Previous region doesn't produce a one-frame velocity spike. Empty on steady frames. Followers
+	 *  re-enter at the same slot index, so this list is reused for the follower prime pass too. */
+	TArray<uint32> ReenteredSlots;
 };
 
 /**
@@ -287,6 +293,10 @@ public:
 		FRDGBufferSRVRef ActiveInstanceIndicesSRV = nullptr;
 		/** Static skeleton inverse ref pose (StructuredBuffer<FGIAG_BoneTRS>). */
 		FRDGBufferSRVRef InverseRefPoseSRV = nullptr;
+		/** Slots primed this frame (Previous=Current). Reused by the follower prime pass (same slot
+		 *  indices). Null/0 when no slot re-entered GPU this frame. */
+		FRDGBufferSRVRef ReenteredSlotsSRV = nullptr;
+		uint32 NumReenteredSlots = 0;
 	};
 
 	/** Render-thread: add all RDG passes for one evaluation to an existing GraphBuilder (caller executes). */

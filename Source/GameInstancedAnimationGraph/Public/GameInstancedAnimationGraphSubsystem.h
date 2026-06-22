@@ -1010,6 +1010,11 @@ public:
 	TMap<FFollowBoneRemapKey, TSharedPtr<const TArray<uint32>>> FollowBoneRemapCache;
 
 private:
+	FDelegateHandle PreActorTickHandle;
+	void OnWorldPreActorTick(UWorld* World, ELevelTick TickType, float DeltaSeconds);
+	FDelegateHandle PostActorTickHandle;
+	void OnWorldPostActorTick(UWorld* World, ELevelTick TickType, float DeltaSeconds);
+
 	// ---- CPU pose cache (written on GT in OnWorldPreActorTick; read on AnyThread by Anim nodes) ----
 	struct FCpuPoseCacheEntry
 	{
@@ -1021,8 +1026,7 @@ private:
 	TMap<int32, FCpuPoseCacheEntry> CpuPoseCacheByRecordIndex;
 	TAtomic<uint64> CpuPoseCacheBuiltFrame { 0 };
 	mutable FThreadSafeCounter CpuNodeFallbackEvalCounter;
-
-	FDelegateHandle PreActorTickHandle;
-	void OnWorldPreActorTick(UWorld* World, ELevelTick TickType, float DeltaSeconds);
 	void PrecomputeCpuPoseCache_GameThread();
+
+	TMap<TWeakObjectPtr<USkeletalMeshComponent>, int32> PendingFollowerMotionVectorClears;
 };

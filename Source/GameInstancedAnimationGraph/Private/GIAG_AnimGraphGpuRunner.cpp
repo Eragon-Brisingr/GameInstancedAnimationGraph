@@ -721,6 +721,35 @@ FGIAG_AnimGraphGpuRunner::FOutputs FGIAG_AnimGraphGpuRunner::AddPasses_RenderThr
 			TBParams.MaxTransformCount = Params.MaxTransformCount;
 
 			GIAG::AddPoseToTransformBufferPasses(GraphBuilder, TBParams);
+
+			// Slots that just (re)entered GPU evaluation this frame: copy Current -> Previous so their
+			// stale Previous region doesn't smear for one frame. Per-slot, runs only on switch/add frames.
+			// Reuse the uploaded slot buffer for the follower prime pass (same slot indices).
+			if (Params.ReenteredSlots.Num() > 0)
+			{
+				const uint32 NumReentered = (uint32)Params.ReenteredSlots.Num();
+				FRDGBufferRef ReenteredRDG = CreateStructuredBuffer(
+					GraphBuilder,
+					TEXT("GIAG_ReenteredSlots"),
+					sizeof(uint32),
+					NumReentered,
+					Params.ReenteredSlots.GetData(),
+					(uint64)sizeof(uint32) * (uint64)NumReentered);
+				FRDGBufferSRVRef ReenteredSRV = GraphBuilder.CreateSRV(FRDGBufferSRVDesc(ReenteredRDG));
+
+				GIAG::FPrimePreviousTransformsPassParams PrimeParams;
+				PrimeParams.NumSlots = NumReentered;
+				PrimeParams.NumBones = (uint32)Params.NumBones;
+				PrimeParams.MaxTransformCount = Params.MaxTransformCount;
+				PrimeParams.BaseTransformOffset = Params.BaseTransformOffset;
+				PrimeParams.BasePreviousTransformOffset = Params.BasePreviousTransformOffset;
+				PrimeParams.SlotIndices = ReenteredSRV;
+				PrimeParams.TransformBuffer = Params.OutputTransformBuffer;
+				GIAG::AddPrimePreviousTransformsPasses(GraphBuilder, PrimeParams);
+
+				Outputs.ReenteredSlotsSRV = ReenteredSRV;
+				Outputs.NumReenteredSlots = NumReentered;
+			}
 		}
 	}
 
