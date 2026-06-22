@@ -53,6 +53,11 @@
 			"Name": "GameInstancedAnimationGraphMaterial",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "GameInstancedAnimationGraphAngelscript",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
 		}
 	],
 	"Plugins": [
