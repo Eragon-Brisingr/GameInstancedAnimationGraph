@@ -236,7 +236,7 @@ struct UGameInstancedAnimationGraphSubsystem::FPrivateUtils
 		return Comp;
 	}
 
-		static void DestroyCpuFollowComponent(USkinnedMeshComponent*& InOutComp)
+	static void DestroyCpuFollowComponent(USkinnedMeshComponent*& InOutComp)
 	{
 		check(InOutComp);
 
