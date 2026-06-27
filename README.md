@@ -1,4 +1,4 @@
-# Instanced Animation Graph (GameInstancedAnimationGraph [GIAG])
+# GameInstancedAnimationGraph [GIAG]
 
 [English](README.md)|[中文](Docs/README_CN.md)|[Node Authoring Rules](Docs/NewNodeRule.md)
 
@@ -452,6 +452,18 @@ GPU->>GPU: Compute pose and write TransformBuffer
 
 - The GPU backend rendering layer currently covers only Nanite Mesh. For mobile or non-Nanite paths, the project side needs to add the corresponding `RenderProxy` and rendering integration.
 - Because Niagara render commands execute first, Niagara Attach cannot correctly receive the current frame's animation result. In practice, Niagara attachments are delayed by one frame.
+
+### UE 5.8 Required Rendering Workarounds (Pending Fix)
+
+In the current UE 5.8 setup, the following features must remain disabled in `Config/DefaultEngine.ini`; otherwise the project can hit a GPU hang / `DEVICE_HUNG`:
+
+```ini
+r.MeshCardRepresentation.SkeletalMesh=0
+r.SkyLight.RealTimeReflectionCapture=0
+```
+
+- `r.MeshCardRepresentation.SkeletalMesh=0`: disables Lumen card generation for all skeletal meshes. In this project, Lumen skeletal-mesh card capture can interact badly when a GIAG `UInstancedSkinnedMeshComponent` coexists with a regular `USkeletalMeshComponent`, leading to a GPU hang in the Lumen card raster/cull path.
+- `r.SkyLight.RealTimeReflectionCapture=0`: disables the movable SkyLight realtime cubemap capture path. In packaged DX12 runs of the example map, that path correlates with first-frame `DEVICE_HUNG`; use baked or specified SkyLight captures instead.
 
 ### UE Skinning TransformBuffer Encoding Limit
 

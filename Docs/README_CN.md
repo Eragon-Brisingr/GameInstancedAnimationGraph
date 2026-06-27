@@ -453,6 +453,18 @@ GPU->>GPU: 计算姿态并写TransformBuffer
 - GPU 后端渲染层当前只覆盖 Nanite Mesh；若需要移动端或非 Nanite 路径，需要项目侧补齐对应 RenderProxy/渲染接入。
 - 由于Niagara渲染命令先执行，导致Niagara Attach没法正确拿到当帧的动画结果（表现为Niagara的Attach会晚一帧）。
 
+### UE 5.8 必须关闭的渲染功能（待解决）
+
+在当前 UE 5.8 环境中，`Config/DefaultEngine.ini` 里需要保持以下配置；否则项目可能触发 GPU hang / `DEVICE_HUNG`：
+
+```ini
+r.MeshCardRepresentation.SkeletalMesh=0
+r.SkyLight.RealTimeReflectionCapture=0
+```
+
+- `r.MeshCardRepresentation.SkeletalMesh=0`：关闭所有 SkeletalMesh 的 Lumen card 生成。本项目中，当 GIAG 的 `UInstancedSkinnedMeshComponent` 与普通 `USkeletalMeshComponent` 共存时，Lumen 骨骼网格 card capture 可能进入异常的 card raster/cull 路径并导致 GPU hang。
+- `r.SkyLight.RealTimeReflectionCapture=0`：关闭可移动 SkyLight 的实时 cubemap capture。示例地图在打包 DX12 运行时，该路径与首帧 `DEVICE_HUNG` 相关；建议使用 baked/specified SkyLight capture。
+
 ### UE Skinning TransformBuffer 编码上限
 
 UE 的 `Engine/Shaders/Shared/SkinningDefinitions.h` 中，`FSkinningHeader::TransformBufferOffset` 默认由 `SKINNING_BUFFER_TRANSFORM_OFFSET_BITS` 控制，基准值为 `22`：
