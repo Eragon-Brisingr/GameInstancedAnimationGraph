@@ -1,393 +1,503 @@
-# GameInstancedAnimationGraph
+# Instanced Animation Graph (GameInstancedAnimationGraph [GIAG])
 
-`GameInstancedAnimationGraph` 是一个支持**批量实例动画**的动画图框架。
+[English](README.md)|[中文](Docs/README_CN.md)|[Node Authoring Rules](Docs/NewNodeRule.md)
 
----
+This design starts from a single question: if a game contains a massive number of animated entities, how can the animation system keep programmable behavior while still delivering practical large-scale performance?
 
-## 你会得到什么
+![5000-entity animation demo](Docs/5k_Inst.gif)
 
-- 一个可在 AnimGraph 中拼接的节点类型（可 CPU/GPU 双路径）
-- 可选的运行时控制 API（蓝图/脚本）
-- 可选的静态资源（按骨架缓存）
+This document is a framework design overview. It focuses on the system layers, data flow, and performance strategy.
 
----
+## Framework Approach
 
-## 快速上手：新增一个节点要做哪些事
+GIAG is designed to reduce animation simulation cost for large numbers of entities. It provides two isomorphic high-performance paths, CPU and GPU, and lets gameplay code assign instances according to its LOD strategy.
 
-### 第 1 步：创建节点类型
+Core principles:
 
-在 `Source/GameInstancedAnimationGraphNode` 下新增：
+- CPU path for high-fidelity near-field animation: instances close to the player, heavy in interaction, or requiring higher visual quality can switch to CPU.
+- GPU path for large-scale LOD: mid-field, far-field, and massive crowds run through GPU compute with throughput as the priority.
+- Event-driven uploads: instead of synchronizing all data every frame, only dirty data is uploaded when state changes.
+- Compile-time preparation: topology analysis, dispatch batching, and pose-space convergence are completed as much as possible during compilation.
+- Gameplay-side quota control: for example, keep at most 16 CPU instances on screen and send the rest to GPU. This framework does not implement that policy; gameplay logic should decide it.
 
-- `Public/GIAG_XXXNode.h`
-- `Private/GIAG_XXXNode.cpp`
-- `Shaders/Nodes/GIAG_XXXNode.usf`（如果要走 GPU）
+Design tradeoffs:
 
-在 `.cpp` 注册：
+- Prioritize the overall balance between near-field quality and far-field throughput instead of optimizing only one backend.
+- Accept some system complexity in exchange for a stable frame budget when the instance count reaches tens of thousands or more.
+- Reduce dual-backend maintenance risk through isomorphic CPU/GPU semantics.
+- Because both backends share the same logic model, pose and behavior changes during switching are controllable, and visual discontinuities are much smaller than in heterogeneous solutions.
 
-- `GIAG_REGISTER_ANIM_NODE(FGIAG_XXXNode);`
+![CPU/GPU mode switching](Docs/CpuGpuSwitch.gif)
 
-可参考已实现节点：
+### Key Performance Constraints and Strategies
 
-- `GIAG_ClipPlayerNode`
-- `GIAG_LayerBlendNode`
-- `GIAG_AdditiveNode`
-- `GIAG_LookAtNode`
+- Event-driven extrapolation: the CPU submits events only when state changes. The GPU extrapolates playback progress every frame from the current time instead of receiving full per-frame synchronization.  
+  Extrapolation formula, simplified:
 
----
+  $$
+  t_{\text{raw}}=(t_{\text{now}}-t_{\text{event}})\cdot Rate+t_{\text{start}}
+  $$
 
-### 第 2 步：定义参数
+  The theoretical playback time is derived from the elapsed time since the event occurred.
 
-建议分成两类：
+- Node batching: after compilation, nodes are executed in batches by node type (`DispatchSchedule`), so nodes of the same type share a single dispatch path.  
+  - Reduces dispatch count and driver overhead.
+  - Lowers state-switching cost and improves data locality on both GPU and CPU.
+  - Provides more stable throughput for high instance counts.
 
-- **静态配置**（建图时给定）  
-  用 `FSettings`（例如骨骼名、轴、掩码、混合时长）
-- **运行时参数**（每实例可改）  
-  放在节点实例里（例如目标位置、开关、动态权重）
+- Sparse dirty-data uploads: parameters and transforms are uploaded with slot-level dirty marking, avoiding "all instances, all nodes, every frame" retransmission.
 
-这样你在图里是：
+- Active instance filtering: `ActiveInstanceIndices` works with visibility and gameplay LOD so only currently required instances are evaluated.
 
-- `Builder.AddNode(Instance.MyNode, MySettings)`（带静态配置）
-- 运行时通过 `FindAnimNode<T>()` + 节点函数去改动态值
+## Compilation Flow
 
----
+GIAG converts a "programmable animation graph" into efficient runtime data and scheduling structures during compilation.
 
-### 第 3 步：实现执行逻辑
+Main stages:
 
-通常最少需要：
+1. Graph construction: `BuildGraph` declares nodes, links, and the final output.
+2. Node compilation: collect node metadata, instance offsets, parameter layouts, and input/output pin information.
+3. Resource planning: allocate pose resources and generate pose-space conversion tasks (`PoseConvertTasks`).
+4. Schedule generation: build `ExecOrder`, `DispatchSchedule`, and `ReverseDispatchSchedule`.
+5. Cull compilation: generate node-cull tables and graph-level cull resource binding information.
 
-- `GatherUploadsGPU(...)`：把运行时参数打包上传（若有 GPU）
-- `AddPassesCPU(...)`：CPU 解算
-- `AddPassesGPU(...)`：GPU pass 调度
+Compilation outputs directly serve runtime execution:
 
-建议做法：
+- Runtime does not need to perform topological sorting again.
+- Batches are grouped by node type, reducing scheduling overhead.
+- Pose spaces explicitly converge inside the dispatch chain, reducing the cost of implicit conversions.
 
-- 先把 CPU 路径跑通（逻辑更容易调试）
-- 再实现 GPU，保持与 CPU 同语义
+## GPU Backend
 
----
+The GPU backend uses a GT/RT division of responsibility:
 
-### 第 3.5 步：给 CPU 路径加 ISPC（可选，但推荐）
+- GT (GameThread): collects dirty data, builds incremental upload packages, and publishes tasks and resource requests.
+- RT (RenderThread): consumes upload packages, builds RDG passes, drives compute execution, and writes into `TransformBuffer`.
 
-如果你的节点 CPU 计算比较重（逐骨/逐实例循环），建议加 `.ispc` 内核。
+Resource preparation flow:
 
-先理解这个项目里 HLSL/ISPC 的同构方式：
+- Skeleton static resources: `ParentIndices`, `InverseRefPose`, and `RefPose`.
+- Animation library resources: clip metadata and TRS data, with support for incremental updates and capacity expansion.
+- Node parameter resources: sparse uploads according to each node's parameter layout.
+- Active instance mapping: `ActiveInstanceIndices`, used to evaluate only visible or active slots.
 
-- 真正的共享数学实现放在：
-  - `Shaders/Common/Shared/GIAG_MathShared.ush`
-- HLSL 包装层：
-  - `Shaders/Common/GIAG_Math.ush`
-- ISPC 包装层：
-  - `Source/GameInstancedAnimationGraph/Public/GIAG_Math.isph`
+Configuration preparation flow:
 
-也就是说：**HLSL 与 ISPC 不是各写一套数学函数，而是共享同一份实现文件**。
+- Bind compilation outputs, including schedule tables, pose resources, and cull parameter symbols.
+- Bind runtime parameters, including instance count, bone count, time, and output offset.
+- When culling is available, execute `GraphCull` first to generate `NeedNodeBits`, then drive node-batch dispatch.
 
-#### 3.5.1 新增 `.ispc` 文件
+Main GPU scheduling path, from the framework's perspective:
 
-例如：
+```mermaid
+flowchart LR
+gameThread[GameThread builds incremental upload] --> renderThread[RenderThread consumes upload]
+renderThread --> graphCull[GraphCull generates NeedNodeBits]
+graphCull --> dispatchBatches[DispatchSchedule node batches]
+dispatchBatches --> poseConvert[PoseSpaceConvert batches]
+poseConvert --> transformWrite[Write UE TransformBuffer]
+transformWrite --> skinningPass[Skinning render pass]
+```
 
-- `Source/GameInstancedAnimationGraphNode/Private/GIAG_XXXNode.ispc`
+## CPU Backend
 
-最小骨架：
+Main CPU scheduling path, including output to the UE animation graph:
+
+```mermaid
+flowchart LR
+tick[SubsystemPreActorTick] --> activeSlots[Collect CpuAliveSlots]
+activeSlots --> cpuRunner[CPURunner executes DispatchSchedule]
+cpuRunner --> finalLocalPose[Generate FinalLocalPose]
+finalLocalPose --> cpuPoseCache[Write CpuPoseCacheByRecordIndex]
+finalLocalPose --> cpuProxy[Write CpuProxySkinnedMesh]
+cpuPoseCache --> ueAnimGraph[UE AnimBP SourceNode reads PoseCache]
+ueAnimGraph --> ueOutputPose[Output to UE animation graph]
+```
+
+Main path notes:
+
+- CPU poses are precomputed on the GT before the frame's actor tick, avoiding repeated solving in the multithreaded AnimBP phase.
+- `CpuPoseCache` acts as the bridge layer and is read directly by the UE animation graph Source Node.
+- For pure CPU proxy instances, output is also synchronized to `CpuProxyActor/SkinnedMeshComponent` to keep visible results consistent.
+
+Typical CPU backend use cases:
+
+- High-fidelity near-field animation: important characters near the player or interaction-heavy characters should prefer CPU.
+- Mixed LOD: some instances in the same world can run on CPU while others run on GPU.
+
+### ISPC Acceleration
+
+ISPC (Intel SPMD Program Compiler) can be understood as a tool that compiles code written in a scalar-like style into CPU SIMD vector instructions.  
+It addresses operator performance on the CPU side and does not change the topology or scheduling semantics of the animation graph.
+At the pure compute level, it can provide 4x or 8x performance improvement, depending on the supported instruction set of the target platform.
+
+Why it fits GIAG:
+
+- Animation computation contains many loops with "the same logic over batches of data" across instances and bones, which is naturally suited for SIMD.
+- Hot paths such as pose-space conversion, TRS operations, and batch blending are mostly pure math, with few branches and stable data structures.
+- When AVX2, AVX-512, or similar instruction sets are available, ISPC can usually reduce per-frame CPU computation time significantly. The actual gain depends on the platform and data shape.
+
+### Integration with the UE Animation System
+
+![GIAG sampling node](Docs/GIAG_ABP.png)
+
+- Keep the data entry point consistent with the UE rendering pipeline.
+- Let GIAG plug in as an "animation compute backend" instead of breaking UE's existing rendering organization.
+
+## Minimal Gameplay API Usage
+
+Gameplay code usually only needs to pass a `SkeletalMesh`, a GIAG graph asset, and an initial transform to `UGameInstancedAnimationGraphSubsystem`. The returned `FGameInstancedAnimationGraphHandle` is then used for playback, LOD backend switching, and lifetime management.
+
+Minimal creation flow in C++:
 
 ```cpp
-#include "GIAG_AnimCommon.isph"
+#include "GameInstancedAnimationGraphSubsystem.h"
+#include "GIAG_AnimGraph.h"
+#include "GIAG_LookAtNode.h"
+#include "Engine/World.h"
 
-struct FGIAG_XXXNode_ISPC
+FGameInstancedAnimationGraphHandle SpawnGIAGInstance(
+    const UObject* WorldContextObject,
+    USkeletalMesh* Mesh,
+    UGIAG_AnimGraph* Graph,
+    UAnimSequence* Idle,
+    TSubclassOf<AActor> CpuProxyClass,
+    const FTransform& InitialTransform)
 {
-	float Alpha;
-	unsigned int32 _pad0;
-	unsigned int32 _pad1;
-	unsigned int32 _pad2;
-};
+    UWorld* World = WorldContextObject ? WorldContextObject->GetWorld() : nullptr;
+    UGameInstancedAnimationGraphSubsystem* Subsystem =
+        World ? World->GetSubsystem<UGameInstancedAnimationGraphSubsystem>() : nullptr;
+    if (!Subsystem || !Mesh || !Graph)
+    {
+        return {};
+    }
 
-export void GIAG_XXXKernel(
-	uniform int NumBones,
-	uniform int NumInstances,
-	uniform int SlotCapacity,
-	const uniform unsigned int32 ActiveInstanceIndices[],
-	const uniform FGIAG_XXXNode_ISPC NodesBySlot[],
-	const uniform FGIAG_BoneTRS InPose[],
-	uniform FGIAG_BoneTRS OutPose[])
-{
-	const uniform int Total = NumBones * NumInstances;
-	foreach (DispatchId = 0 ... Total)
-	{
-		int ActiveIndex = DispatchId / NumBones;
-		int BoneIndex = DispatchId - ActiveIndex * NumBones;
-		int SlotIndex = (int)ActiveInstanceIndices[ActiveIndex];
-		if (SlotIndex < 0 || SlotIndex >= SlotCapacity) continue;
+    // bCpuMode=false starts on GPU; gameplay LOD can switch it to CPU later.
+    FGameInstancedAnimationGraphHandle Handle =
+        Subsystem->AddInstance(Mesh, Graph, InitialTransform, CpuProxyClass, false);
+    if (!Handle)
+    {
+        return {};
+    }
 
-		int Index = SlotIndex * NumBones + BoneIndex;
-		OutPose[Index] = InPose[Index];
-	}
+    Subsystem->PlayAnimation(Handle, Idle, TEXT("Default"), 0.0f, 0.0f, true, 1.0f);
+    return Handle;
 }
 ```
 
-#### 3.5.2 在节点 `.cpp` 中调用生成头
+Common runtime operations:
 
 ```cpp
-#include "GIAG_XXXNode.ispc.generated.h"
-static_assert(sizeof(ispc::FGIAG_BoneTRS) == sizeof(FGIAG_BoneTRS), "layout mismatch");
-static_assert(sizeof(ispc::FGIAG_XXXNode_ISPC) == sizeof(FGIAG_XXXNode), "node layout mismatch");
+// Gameplay LOD: switch close or interaction-heavy instances to CPU, and distant ones back to GPU.
+Subsystem->SetInstanceUseCPUMode(Handle, bShouldUseCPU);
 
-// AddPassesCPU(...)
-ispc::GIAG_XXXKernel(
-	Context.NumBones,
-	Context.NumInstances,
-	Context.SlotCapacity,
-	(const uint32*)Context.ActiveInstanceIndices.GetData(),
-	(const ispc::FGIAG_XXXNode_ISPC*)Context.NodeData[NodeIdx],
-	(const ispc::FGIAG_BoneTRS*)InPose.Data,
-	(ispc::FGIAG_BoneTRS*)OutPose.Data);
+// Update the instance world transform.
+Subsystem->SetInstanceTransform(Handle, NewTransform);
+
+// Modify runtime node parameters, for example a LookAt target.
+auto LookAtNode = Subsystem->FindAnimNode<FGIAG_LookAtNode>(Handle, TEXT("LookAt"));
+if (LookAtNode)
+{
+    LookAtNode->SetTargetLocationWS(LookAtNode, TargetLocationWS);
+}
+
+// Release the instance when it is no longer needed. The handle becomes invalid.
+Subsystem->RemoveInstance(Handle);
 ```
 
-#### 3.5.3 你只需要关心这 3 条
+Common extension APIs:
 
-- `.ispc` 内的节点结构体必须和 C++ 节点实例内存布局一致（含 padding）
-- 只处理 POD 数据，不在 ISPC 内使用 UObject/容器
-- 算法语义与 GPU shader 保持一致（分支和公式尽量同构）
+- Leader/Follow: `AddFollowInstance(MasterHandle, FollowMesh)` creates a follower instance that reuses the master's animation and transform. This is useful for equipment and attached skeletal meshes.
+- Attach: `AttachStaticMesh(...)` / `AttachNiagara(...)` bind a static mesh or Niagara system to a specific bone output.
+- Per-instance material data: `SetMaterialDataFloat(...)`, `SetMaterialDataVector2(...)`, `SetMaterialDataVector3(...)`, and `SetMaterialDataColor(...)` write material parameters per instance, commonly used for color, faction, hit highlight, and similar presentation data.
+- Backend query: `IsInstanceUsingCPUMode(Handle)` is useful for debugging or synchronizing gameplay state.
 
-> 说明：当前模块已在 `GameInstancedAnimationGraphNode.Build.cs` 配好 `Shaders/Common/Shared` 的 include path，ISPC 可直接包含共享实现链路。
+## Additional System Support
 
----
+Because the framework has a GPU path, it should avoid GPU-to-CPU readback.  
+The following features therefore also need additional implementation:
 
-### 第 3.6 步：先确定“节点计算空间契约”（非常重要）
+### Leader/Follow Mesh
 
-本框架已经支持 `LocalPose` / `ComponentPose` 两种姿态空间，并且是**按 pin 显式声明**：
+The Leader/Follow mechanism reduces repeated computation:
 
-- pin 类型在 `EGIAG_AnimPinType` 中定义（`LocalPose` / `ComponentPose`）
-- 编译期会在跨空间连线处自动插入 `PoseSpaceConvert` 任务
+- The Leader is responsible for animation evaluation and output.
+- The Follower reuses the Leader's result and can perform bone mapping when needed.
+- This mechanism mainly optimizes cases such as equipment, where the attached mesh must stay consistent with the main animation.
 
-对自定义节点的规则：
+### Mesh/Niagara Attach
 
-- **节点只做自己声明空间内的计算**，不要在节点内部再写“如果是 local 就转 component”的运行时分支
-- 通过 `GetInputPinType()` / `GetOutputPinType()` 明确声明每个 pose pin 的空间（默认为LocalPose）
-- CPU/GPU 两条路径都要遵守同一个空间契约（公式、分支、边界一致）
+The attach system extends animation bone output to effects and attachments:
 
-典型选择建议：
+- Mesh Attach: attaches static meshes to bone output.
+- Niagara Attach: attaches particle systems to bone output.
 
-- 纯混合/叠加/采样类节点：通常用 `LocalPose`
-- IK/LookAt/Attach 这类天然在组件空间更直接的节点：输入/输出直接声明 `ComponentPose`
-- 需要世界空间的节点：先在组件空间算骨骼，再用 `ComponentToWorldBySlot` 转世界，不要把世界空间作为 pose pin 传播
+## Graph Authoring
 
-可在 CPU 路径里加契约检查（推荐）：
+### Minimal Node Example: ClipNode/Blend/LookAt
 
-- `checkf(InPose.PoseType == EGIAG_AnimPinType::ComponentPose, ...)`
-- 这样能尽早暴露节点声明与实现不一致的问题
-
----
-
-### 第 4 步：把节点接进图
-
-在你的图类（`UGIAG_AnimGraph` 子类）里：
-
-1. 在 `DefaultGraphInstance` 增加节点成员（`UPROPERTY`）
-2. 在 `BuildGraph(...)` 中 `AddNode/Link/SetFinalPose`
-
-参考：
-
-- `Source/InstancedAnimGraphExample/Public/GIAG_AnimGraphExample.h`
-- `Source/InstancedAnimGraphExample/Private/GIAG_AnimGraphExample.cpp`
-
----
-
-### 第 5 步：提供运行时控制（可选）
-
-如果节点需要在游戏中动态控制，建议提供 `UBlueprintFunctionLibrary` 封装：
-
-- `SetEnabled(...)`
-- `SetTarget...(...)`
-- `SetAlpha(...)`
-
-调用链通常是：
-
-1. `Subsystem->FindAnimNode<FGIAG_XXXNode>(Handle, "NodeMemberName")`
-2. 调节点实例函数更新状态
-
----
-
-## 推荐开发顺序（实践上最快）
-
-1. 先定义数据结构和 pin（输入/输出）
-2. 先实现 CPU 路径并验证行为
-3. 再实现 GPU shader 与 pass
-4. 接入示例图做端到端联调
-5. 最后补自动化测试
-
----
-
-## 验证建议
-
-- 编译：先保证 Editor DebugGame 编译通过
-- 行为：在示例图里动态改参数，确认输出符合预期
-- 一致性：CPU/GPU 同场景对比（必要时加自动化测试）
-
----
-
-## 进阶与实现细节
-
-如果你要看“严格规则/契约细节”（比如 cull、optional resource、布局要求），请看：
-
-- `Plugins/GameInstancedAnimationGraph/Docs/NewNodeRule.md`
-
----
-
-## 5 分钟最小节点模板
-
-下面这套模板是最小可运行骨架：**1 输入 Pose -> 1 输出 Pose，CPU 直接透传，GPU 也透传**。  
-你可以先复制通，再往里加自己的算法。
-
-### 1) `Public/GIAG_MinNode.h`
+Minimal graph implementation code, simplified:
 
 ```cpp
-#pragma once
-
-#include "CoreMinimal.h"
-#include "GIAG_AnimNodeBase.h"
-#include "GIAG_MinNode.generated.h"
-
-USTRUCT(BlueprintType)
-struct alignas(16) GAMEINSTANCEDANIMATIONGRAPHNODE_API FGIAG_MinNode final : public FGIAG_AnimNodeBase
+// 1) GraphInstance: node instances live in the same struct, matching the project examples.
+USTRUCT()
+struct FMyGraphInstance : public FGIAG_AnimGraphInstance
 {
-	GENERATED_BODY()
+    GENERATED_BODY()
+
+    FGIAG_ClipPlayerNode Default;
+    FGIAG_ClipPlayerNode Upper;
+    FGIAG_LayerBlendNode LayerBlend;
+    FGIAG_LookAtNode LookAt;
+};
+
+// 2) AnimGraph: owns DefaultGraphInstance and builds the graph from its members in BuildGraph.
+UCLASS()
+class UMyGIAGGraph : public UGIAG_AnimGraph
+{
+    GENERATED_BODY()
 public:
-	using FNodeMeta = TGIAG_AnimNodeMeta<FGIAG_MinNode>;
+    FMyGraphInstance DefaultGraphInstance;
 
-	enum class EInputPin : uint8
-	{
-		Base = 0,
-		Num,
-	};
+    FGIAG_BlendLayerSettings BlendSettings;
+    FGIAG_LookAtSettings LookAtSettings{ TEXT("head") };
 
-protected:
-	friend FNodeMeta;
+    virtual FGIAG_AnimGraphInstanceRef GetDefaultGraphInstance() const override
+    {
+        return { DefaultGraphInstance };
+    }
 
-	const void* GatherUploadsGPU(uint32& OutUploadStrideBytes) const
-	{
-		OutUploadStrideBytes = 0;
-		return nullptr;
-	}
+    virtual void BuildGraph(FGIAG_AnimGraphBuilder& Builder) const override
+    {
+        const auto& Instance = DefaultGraphInstance;
 
-	static void AddPassesGPU(const FGIAG_AnimNodeDispatchContext& Context);
-	static void AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& Context);
+        const auto Default = Builder.AddNode(Instance.Default);
+        const auto Upper = Builder.AddNode(Instance.Upper);
+        const auto Blend = Builder.AddNode(Instance.LayerBlend, BlendSettings);
+        const auto LookAt = Builder.AddNode(Instance.LookAt, LookAtSettings);
+
+        Builder.Link(GIAG_PIN_OUT(Default, Out), GIAG_PIN_IN(Blend, Base));
+        Builder.Link(GIAG_PIN_OUT(Upper, Out), GIAG_PIN_IN(Blend, Layer));
+        Builder.Link(GIAG_PIN_OUT(Blend, Out), GIAG_PIN_IN(LookAt, Base));
+
+        Builder.SetFinalPose(GIAG_PIN_OUT(LookAt, Out));
+    }
 };
+
+// 3) Modify dynamic node parameters at runtime.
+void SetRuntimeParams(const UObject* WorldContextObject, const FGameInstancedAnimationGraphHandle& Handle)
+{
+    UGameInstancedAnimationGraphSubsystem* Subsystem = World->GetSubsystem<UGameInstancedAnimationGraphSubsystem>();
+    auto LookAtNode = Subsystem->FindAnimNode<FGIAG_LookAtNode>(Handle, TEXT("LookAt"));
+    LookAtNode->SetTargetLocationWS(LookAtNode, TargetLocationWS);
+}
 ```
 
-### 2) `Private/GIAG_MinNode.cpp`
+```mermaid
+flowchart LR
+default[Default] --> blendNode[Blend]
+upper[Upper] --> blendNode[Blend]
+blendNode --> lookAtNode[LookAt]
+lookAtNode --> finalPose[FinalPose]
+```
+
+## Node Authoring
+
+GIAG node authoring follows the principle of "one contract, dual-backend execution."
+
+For the complete new-node rules, CPU/GPU minimal template, and implementation contracts, see [Node Authoring Rules](Docs/NewNodeRule.md).
+
+Node contract:
+
+- Clearly define input/output pin semantics.
+- Declare optional resource requests, when needed and not as a requirement.
+- Provide corresponding GPU and CPU execution entry points.
+- Optionally provide cull logic that stays consistent across CPU and GPU.
+
+Minimal node implementation example, simplified and omitting full parameter and registration details:
 
 ```cpp
-#include "GIAG_MinNode.h"
-
-#include "GIAG_AnimNodeMetaManager.h"
-#include "GIAG_RdgDispatchTiling.h"
-#include "GlobalShader.h"
-#include "RenderGraphBuilder.h"
-#include "RenderGraphUtils.h"
-#include "ShaderParameterStruct.h"
-
-GIAG_REGISTER_ANIM_NODE(FGIAG_MinNode);
-
-namespace
+// C++: minimal BlendNode shape, simplified.
+USTRUCT(BlueprintType)
+struct FGIAG_MinBlendNode : public FGIAG_AnimNodeBase
 {
-	class FGIAG_PoseMinCS : public FGlobalShader
-	{
-	public:
-		DECLARE_GLOBAL_SHADER(FGIAG_PoseMinCS);
-		SHADER_USE_PARAMETER_STRUCT(FGIAG_PoseMinCS, FGlobalShader);
+    GENERATED_BODY()
 
-		BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-			SHADER_PARAMETER(uint32, NumBones)
-			SHADER_PARAMETER(uint32, NumInstances)
-			SHADER_PARAMETER(uint32, DispatchGroupCountX)
-			SHADER_PARAMETER(uint32, DispatchGroupCountY)
-			SHADER_PARAMETER(uint32, DispatchGroupOffset)
-			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_BoneTRS>, BasePose)
-			SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FGIAG_BoneTRS>, RW_OutPose)
-		END_SHADER_PARAMETER_STRUCT()
+    enum class EInputPin : uint8 { A = 0, B, Num };
+    enum class EOutputPin : uint8 { Out = 0, Num };
 
-		static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters&) { return true; }
-		static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters&, FShaderCompilerEnvironment& OutEnvironment)
-		{
-			OutEnvironment.SetDefine(TEXT("THREADS_X"), 64);
-			OutEnvironment.SetDefine(TEXT("THREADS_Y"), 1);
-			OutEnvironment.SetDefine(TEXT("THREADS_Z"), 1);
-		}
-	};
-	IMPLEMENT_GLOBAL_SHADER(FGIAG_PoseMinCS, "/GameInstancedAnimationGraphNode/GIAG_MinNode.usf", "Main", SF_Compute);
-}
+    float Alpha = 0.5f;
 
-void FGIAG_MinNode::AddPassesGPU(const FGIAG_AnimNodeDispatchContext& Context)
-{
-	for (int32 NodeInBatch = 0; NodeInBatch < Context.NodeIndices.Num(); ++NodeInBatch)
-	{
-		FGIAG_PoseMinCS::FParameters* P = Context.GraphBuilder.AllocParameters<FGIAG_PoseMinCS::FParameters>();
-		P->NumBones = (uint32)Context.NumBones;
-		P->NumInstances = (uint32)Context.NumInstances;
-		P->DispatchGroupCountX = 0; // 按你项目现有 RDGDispatchTiling 封装补齐
-		P->DispatchGroupCountY = 0;
-		P->DispatchGroupOffset = 0;
-		P->BasePose = Context.InputPosesPerNode[NodeInBatch][(uint8)EInputPin::Base].SRV;
-		P->RW_OutPose = Context.OutputPosesPerNode[NodeInBatch][(uint8)EOutputPin::Out].UAV;
-		// 这里复用你现有节点（RefPose/Additive/LayerBlend）的 AddPass 模式即可
-	}
-}
+    const void* GatherUploadsGPU(uint32& OutStride) const
+    {
+        OutStride = sizeof(float);
+        return &Alpha;
+    }
 
-void FGIAG_MinNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& Context)
-{
-	for (int32 NodeInBatch = 0; NodeInBatch < Context.NodeIndices.Num(); ++NodeInBatch)
-	{
-		const FGIAG_CPUPoseBufferView Base = Context.InputPosesPerNode[NodeInBatch][(uint8)EInputPin::Base];
-		const FGIAG_CPUPoseBufferView Out = Context.OutputPosesPerNode[NodeInBatch][(uint8)EOutputPin::Out];
-		check(Base.IsValid() && Out.IsValid());
+    static void AddPassesGPU(const FGIAG_AnimNodeDispatchContext& Ctx)
+    {
+        // Bind A/B input poses and the Alpha parameter, then dispatch BlendCS.
+    }
 
-		for (const int32 SlotIndex : Context.ActiveInstanceIndices)
-		{
-			FMemory::Memcpy(&Out.At(SlotIndex, 0), &Base.At(SlotIndex, 0), sizeof(FGIAG_BoneTRS) * (SIZE_T)Context.NumBones);
-		}
-	}
-}
+    static void AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& Ctx)
+    {
+        // Call an ISPC kernel to blend bones over active slots.
+    }
+};
 ```
-
-### 3) `Shaders/Nodes/GIAG_MinNode.usf`
 
 ```hlsl
-#include "/Engine/Public/Platform.ush"
-#include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
+// HLSL: minimal Blend kernel, simplified.
+StructuredBuffer<float4> InPoseA;
+StructuredBuffer<float4> InPoseB;
+StructuredBuffer<float>  NodeAlpha;
+RWStructuredBuffer<float4> OutPose;
 
-uint NumBones;
-uint NumInstances;
-uint DispatchGroupCountX;
-uint DispatchGroupCountY;
-uint DispatchGroupOffset;
-
-StructuredBuffer<FGIAG_BoneTRS> BasePose;
-RWStructuredBuffer<FGIAG_BoneTRS> RW_OutPose;
-
-[numthreads(THREADS_X, THREADS_Y, THREADS_Z)]
-void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+[numthreads(64, 1, 1)]
+void Main(uint DispatchId : SV_DispatchThreadID)
 {
-	uint GroupLinear = DispatchGroupOffset + GroupId.x + GroupId.y * DispatchGroupCountX + GroupId.z * (DispatchGroupCountX * DispatchGroupCountY);
-	uint DispatchId = GroupLinear * (THREADS_X * THREADS_Y * THREADS_Z) + GroupIndex;
-	uint Total = NumBones * NumInstances;
-	if (DispatchId >= Total) return;
-	RW_OutPose[DispatchId] = BasePose[DispatchId];
+    float a = saturate(NodeAlpha[0]);
+    float4 pa = InPoseA[DispatchId];
+    float4 pb = InPoseB[DispatchId];
+    OutPose[DispatchId] = lerp(pa, pb, a);
 }
 ```
 
-### 4) 在图里接入最小节点
-
-```cpp
-const auto Default = Builder.AddNode(Instance.Default);
-const auto Min = Builder.AddNode(Instance.Min);
-Builder.Link(GIAG_PIN_OUT(Default, Out), GIAG_PIN_IN(Min, Base));
-Builder.SetFinalPose(GIAG_PIN_OUT(Min, Out));
+```ispc
+// ISPC: minimal CPU-side Blend kernel, simplified.
+export void GIAG_BlendPose(
+    uniform int count,
+    uniform float alpha,
+    uniform const float4* poseA,
+    uniform const float4* poseB,
+    uniform float4* outPose)
+{
+    foreach (i = 0 ... count)
+    {
+        outPose[i] = poseA[i] * (1.0f - alpha) + poseB[i] * alpha;
+    }
+}
 ```
 
-### 5) 什么时候开始加复杂功能
+### Isomorphic CPU/GPU Math Strategy
 
-- 先确认“透传模板”编译/运行通过
-- 再逐步加：
-  - 运行时参数（并在变化时 `MarkDirty()`）
-  - 静态 `FSettings`
-  - optional resource
-  - cull 逻辑
+GIAG first abstracts algorithms into platform-independent mathematical cores, then lets HLSL and ISPC handle only type mapping.
+
+Recommended approach:
+
+1. Define a cross-backend consistent data layout first, using POD data and explicit padding, such as `FGIAG_BoneTRS`.  
+2. Keep the shared layer pure math, without dependencies on UE objects, thread state, or platform-specific APIs.
+
+Minimal template, following the style of `GIAG_MathShared.ush`:
+
+```cpp
+// Shared/GIAG_MathShared.ush: platform-independent core.
+struct FGIAG_BoneTRS
+{
+    FQuat Rotation;
+    float3 Translation;
+    float TranslationPad;
+    float3 Scale3D;
+    float ScalePad;
+};
+
+GIAG_INLINE FQuat GIAG_NormalizeQuat(FQuat Q)
+{
+    const float Len2 = dot(Q, Q);
+    return Q * rsqrt(Len2);
+}
+
+GIAG_INLINE FQuat GIAG_AlignQuatToRef(FQuat Ref, FQuat Q)
+{
+    return (dot(Ref, Q) < 0.0) ? Q * (-1.0) : Q;
+}
+```
+
+The cross-CPU/GPU platform "magic" is macro mapping:
+
+```hlsl
+// HLSL wrapper: maps types only and does not rewrite the algorithm.
+typedef float4 FQuat;
+#define GIAG_FLOAT3(x,y,z) float3(x,y,z)
+#define GIAG_FLOAT4(x,y,z,w) float4(x,y,z,w)
+#define GIAG_GET4(v,i) ((v)[i])
+#include "/GameInstancedAnimationGraphShader/Shared/GIAG_MathShared.ush"
+```
+
+```cpp
+// ISPC wrapper: also maps types only and does not rewrite the algorithm.
+typedef FVector4f FQuat;
+#define GIAG_FLOAT3(x,y,z) make_float3((x),(y),(z))
+#define GIAG_FLOAT4(x,y,z,w) SetVector4((x),(y),(z),(w))
+#define GIAG_GET4(v,i) ((v).V[(i)])
+#include "GIAG_MathShared.ush"
+```
+
+The value of this approach is that CPU/GPU algorithm evolution remains bound to the same core implementation. Behavior and visuals are more stable when switching paths, and long-term drift is less likely.
+
+### Runtime Timing Overview (GT/RT/GPU)
+
+```mermaid
+sequenceDiagram
+participant GT as GameThread
+participant RT as RenderThread
+participant GPU as GPUCompute
+GT->>GT: Collect events and dirty parameters
+GT->>RT: Publish incremental upload and execution request
+RT->>GPU: Submit GraphCull and node batches
+GPU->>GPU: Compute pose and write TransformBuffer
+```
+
+## Current Issues
+
+- The GPU backend rendering layer currently covers only Nanite Mesh. For mobile or non-Nanite paths, the project side needs to add the corresponding `RenderProxy` and rendering integration.
+- Because Niagara render commands execute first, Niagara Attach cannot correctly receive the current frame's animation result. In practice, Niagara attachments are delayed by one frame.
+
+### UE Skinning TransformBuffer Encoding Limit
+
+In UE's `Engine/Shaders/Shared/SkinningDefinitions.h`, `FSkinningHeader::TransformBufferOffset` is controlled by `SKINNING_BUFFER_TRANSFORM_OFFSET_BITS`. Baseline value is `22`:
+
+```cpp
+#define SKINNING_BUFFER_TRANSFORM_OFFSET_BITS 22
+```
+
+That gives a maximum encodable `TransformBufferOffset` range of approximately:
+
+```text
+OffsetMax = 2^22 - 1 = 4,194,303
+```
+
+UE allocates TransformBuffer space for both current-frame and previous-frame bone transforms. The core relationship can be estimated as:
+
+```text
+TransformNeededSize = UniqueAnimationCount * MaxTransformCount * 2
+MaxInstances ~= floor(2^22 / (MaxTransformCount * 2))
+```
+
+Where:
+
+- `UniqueAnimationCount` roughly maps to the number of animated instances in the same render batch.
+- `MaxTransformCount` is the maximum number of bone transforms reserved per instance on the UE skinning side. It is usually close to or higher than the skeleton bone count.
+- `* 2` comes from the Current/Previous transform regions used for previous-frame data, velocity, motion blur, and related logic.
+
+Example estimates:
+
+```text
+MaxTransformCount = 200: floor(4,194,304 / (200 * 2)) = 10,485
+MaxTransformCount = 220: floor(4,194,304 / (220 * 2)) = 9,532
+MaxTransformCount = 256: floor(4,194,304 / (256 * 2)) = 8,192
+```
+
+Therefore, without modifying the UE engine, the current GPU path should not be documented as reliably exceeding `10K` renderable simulation instances. The practical limit can be lower depending on bone count, Follow/Attach usage, other skeletal buckets, allocator fragmentation, and safety margin.
+
+To reliably exceed `10K` instances, the UE engine skinning header bit allocation and related C++/HLSL packing logic must be changed to expand the encodable `TransformBufferOffset` range. The `FSkinningHeader` layout, shader decoding, and platform compatibility then need to be revalidated.
+
+## Comparison with Similar Solutions
+
+| Dimension | This Solution (GIAG) | [Vertex Anim](https://dev.epicgames.com/documentation/en-us/unreal-engine/vertex-animation-tool-in-unreal-engine) | [TurboSequence](https://github.com/LukasFratzl/TurboSequence) |
+| --- | --- | --- | --- |
+| Requires resource preprocessing | Does not require mandatory offline preprocessing, supports runtime incremental preparation | Strongly depends on offline baking, such as textures or caches | Requires offline baking and defines a custom offline baking flow |
+| Animation blending support | Native in-graph blending at node level | Limited blending capability, often relying on combinations of prebaked assets | Supports some blending, but complex graph semantics are usually weaker than a full animation graph |
+| Animation graph evaluation location | Isomorphic CPU/GPU dual paths, dynamically assigned by gameplay LOD | Mainly consumes prebaked results in the material or vertex stage | Focuses on optimizing the instanced rendering path; animation graph computation is usually not the core capability |
+| Simulation scale | Without UE engine changes, limited by the Skinning TransformBuffer offset and currently estimated below `10K` instances; engine changes can extend this further | Can support extremely large rendering scale, but flexibility is constrained by prebaking | Targets medium-to-large-scale instanced characters, between traditional `SkeletalMesh` and dedicated prebaked solutions |
+| Programmable animation logic | High, logic can be extended through the node system | Low, mainly determined by preprocessed assets | Medium, with project-side extension space, but graph expressiveness is usually limited |

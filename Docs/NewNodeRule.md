@@ -1,236 +1,595 @@
-# GameInstancedAnimationGraph 节点编写规则
+# GameInstancedAnimationGraph Node Authoring Rules
 
-本文用于统一 `GameInstancedAnimationGraphNode` 中新节点的实现规范，目标是：
-- CPU/GPU 双路径语义一致
-- 参数与资源布局稳定
-- 以契约式编程为主，不写冗余防御逻辑
+<!-- markdownlint-disable MD010 -->
 
----
+[English](NewNodeRule.md)|[中文](NewNodeRule_CN.md)|[Framework Overview](../README.md)
 
-## 1. 总体原则
+This document standardizes how new nodes should be implemented in `GameInstancedAnimationGraphNode`. The goals are:
 
-- 采用**契约式编程**：前置条件用 `check/checkf` 明确约束。
-- 框架已保证的数据，不再做重复判空/兜底分支。
-- 节点语义必须在 CPU/GPU 两条路径保持同构（公式、分支条件、参数含义一致）。
-- 运行时热路径避免额外分配，优先复用现有缓存和批处理上下文。
+- Keep CPU/GPU semantics consistent.
+- Keep parameter and resource layouts stable.
+- Prefer contract-style programming over redundant defensive fallbacks.
 
 ---
 
-## 1.1 计算空间契约（LocalPose / ComponentPose）
+## Quick Start: What To Do When Adding a Node
 
-框架采用**pin 级空间契约**，不是节点内部“推断空间”：
+This section is the practical entry point. Later sections describe the stricter rules behind it.
 
-- Pose pin 类型由 `EGIAG_AnimPinType` 声明（`LocalPose` / `ComponentPose`）
-- 编译期在跨空间连线处自动插入 `PoseSpaceConvert`
-- `FinalPose` 编译后会收敛到 `ComponentPose`
+### Step 1: Create the Node Type
 
-节点实现规范：
+Add the following under `Source/GameInstancedAnimationGraphNode`:
 
-- 在 `GetInputPinType()` / `GetOutputPinType()` 中明确声明空间（默认为LocalPose）
-- 节点内部只处理声明空间，不写额外 runtime 空间分支
-- CPU 与 GPU 必须对同一 pin 空间语义完全一致
+- `Public/GIAG_XXXNode.h`
+- `Private/GIAG_XXXNode.cpp`
+- `Private/GIAG_XXXNode.ispc` when the CPU hot path benefits from SIMD
+- `Shaders/Nodes/GIAG_XXXNode.usf`
 
-推荐做法：
+Register the node in the `.cpp` file:
 
-- 纯骨骼局部运算（blend/additive/采样）优先 `LocalPose`
-- IK/LookAt/Attach 等依赖全局骨骼关系的运算优先 `ComponentPose`
-- 世界空间计算通过 `ComponentToWorldBySlot` 在节点末端完成，不把 World 作为 pose pin 空间扩散
+```cpp
+GIAG_REGISTER_ANIM_NODE(FGIAG_XXXNode);
+```
+
+Existing nodes to use as references:
+
+- `FGIAG_RefPoseNode`
+- `FGIAG_ClipPlayerNode`
+- `FGIAG_LayerBlendNode`
+- `FGIAG_AdditiveNode`
+- `FGIAG_LookAtNode`
+
+### Step 2: Define Pins, Static Settings, and Runtime Parameters
+
+Decide these first:
+
+- Input/output pose pin space: the default is `LocalPose`; implement `GetInputPinType()` / `GetOutputPinType()` explicitly when a node needs component space.
+- Static settings: put them in `FSettings`, then pass them through `Builder.AddNode(Node, Settings)` into compiled data.
+- Runtime state: store it in node instance members, update it after finding the node with `FindAnimNode<T>()`, and call `NodeRef.MarkDirty()` when values change.
+
+### Step 3: Implement CPU/GPU Execution
+
+Node execution entry points include:
+
+- `GatherUploadsGPU(...)`: exposes runtime parameters for sparse GPU upload; return `nullptr` when there is no upload data.
+- `AddPassesCPU(...)`: CPU solving, preferably using math semantics that match the shader.
+- `AddPassesGPU(...)`: GPU RDG pass scheduling, iterating same-type node batches through `Context.NodeIndices`.
+
+A practical workflow is to get the CPU path running first, then add the GPU shader. For GPU passes, follow the existing `RDGDispatchTiling::ForEachChunk` pattern instead of writing a dispatch style that diverges from the project.
+
+### Step 4: Copy the CPU/GPU Passthrough Template
+
+The following is the smallest runnable node shape: **1 input Pose -> 1 output Pose, direct passthrough on both CPU and GPU**. Get this compiling and running first, then replace the passthrough with your own algorithm, parameters, optional resource, cull logic, or ISPC kernel.
+
+#### 4.1 `Public/GIAG_MinNode.h`
+
+```cpp
+#pragma once
+
+#include "CoreMinimal.h"
+#include "GIAG_AnimNodeBase.h"
+#include "GIAG_MinNode.generated.h"
+
+USTRUCT(BlueprintType)
+struct alignas(16) GAMEINSTANCEDANIMATIONGRAPHNODE_API FGIAG_MinNode final : public FGIAG_AnimNodeBase
+{
+	GENERATED_BODY()
+public:
+	using FNodeMeta = TGIAG_AnimNodeMeta<FGIAG_MinNode>;
+
+	enum class EInputPin : uint8
+	{
+		Base = 0,
+		Num,
+	};
+
+	static EGIAG_AnimPinType GetInputPinType(int32 PinIndex)
+	{
+		check(PinIndex == (int32)EInputPin::Base);
+		return EGIAG_AnimPinType::LocalPose;
+	}
+
+	static EGIAG_AnimPinType GetOutputPinType(int32 PinIndex)
+	{
+		check(PinIndex == (int32)EOutputPin::Out);
+		return EGIAG_AnimPinType::LocalPose;
+	}
+
+protected:
+	friend FNodeMeta;
+
+	const void* GatherUploadsGPU(uint32& OutUploadStrideBytes) const
+	{
+		OutUploadStrideBytes = 0;
+		return nullptr;
+	}
+
+	static void AddPassesGPU(const FGIAG_AnimNodeDispatchContext& Context);
+	static void AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& Context);
+};
+```
+
+#### 4.2 `Private/GIAG_MinNode.cpp`
+
+```cpp
+#include "GIAG_MinNode.h"
+
+#include "GIAG_AnimNodeMetaManager.h"
+#include "GIAG_RdgDispatchTiling.h"
+#include "GlobalShader.h"
+#include "RenderGraphBuilder.h"
+#include "RenderGraphUtils.h"
+#include "ShaderParameterStruct.h"
+
+GIAG_REGISTER_ANIM_NODE(FGIAG_MinNode);
+
+namespace
+{
+	class FGIAG_PoseMinCS : public FGlobalShader
+	{
+	public:
+		DECLARE_GLOBAL_SHADER(FGIAG_PoseMinCS);
+		SHADER_USE_PARAMETER_STRUCT(FGIAG_PoseMinCS, FGlobalShader);
+
+		BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+			SHADER_PARAMETER(uint32, NumBones)
+			SHADER_PARAMETER(uint32, NumInstances)
+			SHADER_PARAMETER(uint32, DispatchGroupCountX)
+			SHADER_PARAMETER(uint32, DispatchGroupCountY)
+			SHADER_PARAMETER(uint32, DispatchGroupOffset)
+			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint32>, ActiveInstanceIndices)
+			SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FGIAG_BoneTRS>, BasePose)
+			SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FGIAG_BoneTRS>, RW_OutPose)
+		END_SHADER_PARAMETER_STRUCT()
+
+		static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters&) { return true; }
+		static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+		{
+			FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+			OutEnvironment.SetDefine(TEXT("THREADS_X"), 64);
+			OutEnvironment.SetDefine(TEXT("THREADS_Y"), 1);
+			OutEnvironment.SetDefine(TEXT("THREADS_Z"), 1);
+		}
+	};
+
+	IMPLEMENT_GLOBAL_SHADER(FGIAG_PoseMinCS, "/GameInstancedAnimationGraphNode/GIAG_MinNode.usf", "Main", SF_Compute);
+
+	static void AddPoseMinPass(
+		FRDGBuilder& GraphBuilder,
+		uint32 NumBones,
+		uint32 NumInstances,
+		FRDGBufferSRVRef ActiveInstanceIndices,
+		FRDGBufferSRVRef BasePose,
+		FRDGBufferUAVRef RW_OutPose)
+	{
+		FGIAG_PoseMinCS::FParameters* BaseParameters = GraphBuilder.AllocParameters<FGIAG_PoseMinCS::FParameters>();
+		BaseParameters->NumBones = NumBones;
+		BaseParameters->NumInstances = NumInstances;
+		BaseParameters->ActiveInstanceIndices = ActiveInstanceIndices;
+		BaseParameters->BasePose = BasePose;
+		BaseParameters->RW_OutPose = RW_OutPose;
+
+		TShaderMapRef<FGIAG_PoseMinCS> ComputeShader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
+
+		constexpr int32 ThreadsPerGroup = 64;
+		const int64 TotalWorkItems = (int64)NumBones * (int64)NumInstances;
+		GIAG::RDGDispatchTiling::ForEachChunk(
+			TotalWorkItems,
+			ThreadsPerGroup,
+			[&](int32, int32 GroupOffset1D, const FIntVector& GroupCount)
+			{
+				FGIAG_PoseMinCS::FParameters* ChunkParameters = GraphBuilder.AllocParameters<FGIAG_PoseMinCS::FParameters>();
+				*ChunkParameters = *BaseParameters;
+				ChunkParameters->DispatchGroupCountX = (uint32)GroupCount.X;
+				ChunkParameters->DispatchGroupCountY = (uint32)GroupCount.Y;
+				ChunkParameters->DispatchGroupOffset = (uint32)GroupOffset1D;
+
+				GraphBuilder.AddPass(
+					RDG_EVENT_NAME("GIAG_Min"),
+					ChunkParameters,
+					ERDGPassFlags::Compute,
+					[ChunkParameters, ComputeShader, GroupCount](FRHIComputeCommandList& RHICmdList)
+					{
+						FComputeShaderUtils::Dispatch(RHICmdList, ComputeShader, *ChunkParameters, GroupCount);
+					});
+			});
+	}
+}
+
+void FGIAG_MinNode::AddPassesGPU(const FGIAG_AnimNodeDispatchContext& Context)
+{
+	for (int32 NodeIndexInBatch = 0; NodeIndexInBatch < Context.NodeIndices.Num(); ++NodeIndexInBatch)
+	{
+		AddPoseMinPass(
+			Context.GraphBuilder,
+			(uint32)Context.NumBones,
+			(uint32)Context.NumInstances,
+			Context.ActiveInstanceIndicesSRV,
+			Context.InputPosesPerNode[NodeIndexInBatch][(uint8)EInputPin::Base].SRV,
+			Context.OutputPosesPerNode[NodeIndexInBatch][(uint8)EOutputPin::Out].UAV);
+	}
+}
+
+void FGIAG_MinNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& Context)
+{
+	check(Context.InputPosesPerNode.Num() == Context.NodeIndices.Num());
+	check(Context.OutputPosesPerNode.Num() == Context.NodeIndices.Num());
+
+	for (int32 NodeIndexInBatch = 0; NodeIndexInBatch < Context.NodeIndices.Num(); ++NodeIndexInBatch)
+	{
+		const FGIAG_CPUPoseBufferView BasePose = Context.InputPosesPerNode[NodeIndexInBatch][(uint8)EInputPin::Base];
+		const FGIAG_CPUPoseBufferView OutPose = Context.OutputPosesPerNode[NodeIndexInBatch][(uint8)EOutputPin::Out];
+		check(BasePose.IsValid() && OutPose.IsValid());
+		check(BasePose.PoseType == EGIAG_AnimPinType::LocalPose);
+		check(OutPose.PoseType == EGIAG_AnimPinType::LocalPose);
+
+		for (const int32 SlotIndex : Context.ActiveInstanceIndices)
+		{
+			check(SlotIndex >= 0 && SlotIndex < Context.SlotCapacity);
+			FMemory::Memcpy(
+				&OutPose.At(SlotIndex, 0),
+				&BasePose.At(SlotIndex, 0),
+				sizeof(FGIAG_BoneTRS) * (SIZE_T)Context.NumBones);
+		}
+	}
+}
+```
+
+#### 4.3 `Shaders/Nodes/GIAG_MinNode.usf`
+
+```hlsl
+#include "/Engine/Public/Platform.ush"
+#include "/GameInstancedAnimationGraphShader/GIAG_AnimCommon.ush"
+
+uint NumBones;
+uint NumInstances;
+uint DispatchGroupCountX;
+uint DispatchGroupCountY;
+uint DispatchGroupOffset;
+
+StructuredBuffer<uint> ActiveInstanceIndices;
+StructuredBuffer<FGIAG_BoneTRS> BasePose;
+RWStructuredBuffer<FGIAG_BoneTRS> RW_OutPose;
+
+[numthreads(THREADS_X, THREADS_Y, THREADS_Z)]
+void Main(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	uint GroupLinear =
+		DispatchGroupOffset +
+		GroupId.x +
+		GroupId.y * DispatchGroupCountX +
+		GroupId.z * (DispatchGroupCountX * DispatchGroupCountY);
+	uint DispatchId = GroupLinear * (THREADS_X * THREADS_Y * THREADS_Z) + GroupIndex;
+	uint Total = NumBones * NumInstances;
+	if (DispatchId >= Total)
+	{
+		return;
+	}
+
+	uint ActiveIndex = DispatchId / NumBones;
+	uint BoneIndex = DispatchId - ActiveIndex * NumBones;
+	uint SlotIndex = ActiveInstanceIndices[ActiveIndex];
+	uint Index = SlotIndex * NumBones + BoneIndex;
+
+	RW_OutPose[Index] = BasePose[Index];
+}
+```
+
+#### 4.4 Wire the Minimal Node into a Graph
+
+```cpp
+const auto Default = Builder.AddNode(Instance.Default);
+const auto Min = Builder.AddNode(Instance.Min);
+Builder.Link(GIAG_PIN_OUT(Default, Out), GIAG_PIN_IN(Min, Base));
+Builder.SetFinalPose(GIAG_PIN_OUT(Min, Out));
+```
+
+### Step 5: Add Extension Points as Needed
+
+Choose based on node requirements:
+
+- CPU hot loops over bones or instances: add an `.ispc` kernel.
+- Static and shareable data: add optional resources.
+- Input culling: implement both `ComputeCullNeedMaskCPU(...)` and `EmitCullNeedMaskHlslBody(...)`.
+- Runtime control: expose a `UBlueprintFunctionLibrary` or script wrapper.
+
+### Step 6: Validate and Replace the Passthrough
+
+After the minimal template works, replace it incrementally:
+
+1. Confirm the passthrough template compiles and runs.
+2. Add runtime parameters, and call `MarkDirty()` when values change.
+3. Put static configuration into `FSettings`; do not upload it every frame.
+4. Validate CPU/GPU semantic consistency in an example graph or test.
+
+References:
+
+- `Source/InstancedAnimGraphExample/Public/GIAG_AnimGraphExample.h`
+- `Source/InstancedAnimGraphExample/Private/GIAG_AnimGraphExample.cpp`
 
 ---
 
-## 2. 节点文件与注册
+## 1. General Principles
 
-新增节点通常需要：
+- Use **contract-style programming**: express preconditions with `check/checkf`.
+- Do not repeat null checks or fallback branches for data already guaranteed by the framework.
+- Node semantics must stay isomorphic across CPU/GPU paths, including formulas, branch conditions, and parameter meanings.
+- Avoid extra allocations on runtime hot paths; prefer existing caches and batch contexts.
 
-- C++ 头文件：
+---
+
+## 1.1 Pose-Space Contract (LocalPose / ComponentPose)
+
+The framework uses a **pin-level pose-space contract**, not node-internal "space inference":
+
+- Pose pin types are declared with `EGIAG_AnimPinType` (`LocalPose` / `ComponentPose`).
+- The compiler inserts `PoseSpaceConvert` tasks for cross-space links.
+- `FinalPose` converges to `ComponentPose` after compilation.
+
+Node implementation rules:
+
+- Declare each pose pin space in `GetInputPinType()` / `GetOutputPinType()`; the default is `LocalPose`.
+- A node only computes in its declared space; do not add extra runtime space branches inside the node.
+- CPU and GPU must use exactly the same pin-space semantics.
+
+Recommendations:
+
+- Pure local-bone operations, such as blend, additive, and sampling, should usually use `LocalPose`.
+- IK, LookAt, Attach, and similar operations that depend on global bone relationships should usually use `ComponentPose`.
+- World-space calculations should use `ComponentToWorldBySlot` near the end of the node; do not propagate world space as a pose pin space.
+
+---
+
+## 2. Node Files and Registration
+
+New nodes usually include:
+
+- C++ header:
   - `Source/GameInstancedAnimationGraphNode/Public/GIAG_XXXNode.h`
-- C++ 实现：
+- C++ implementation:
   - `Source/GameInstancedAnimationGraphNode/Private/GIAG_XXXNode.cpp`
-- GPU Shader：
+- GPU shader:
   - `Shaders/Nodes/GIAG_XXXNode.usf`
 
-并在 `.cpp` 中注册：
+Register the node in the `.cpp` file:
 
 - `GIAG_REGISTER_ANIM_NODE(FGIAG_XXXNode);`
 
 ---
 
-## 3. 参数分层（强制）
+## 3. Parameter Layering
 
-节点参数分两层：
+Node parameters are split into two layers:
 
-- **静态配置（编译期）**：放 `FSettings`
-  - 例如骨骼名、轴定义、混合策略、掩码表等。
-  - 通过 `Builder.AddNode(Node, Settings)` 进入编译数据。
-- **运行时状态（实例态）**：放节点实例成员
-  - 例如目标位置、开关状态、时间戳、动态权重。
-  - 通过 Blueprint/脚本 API 修改，必要时 `NodeRef.MarkDirty()`。
+- **Static configuration (compile time)**: put it in `FSettings`.
+  - Examples: bone names, axis definitions, blend strategies, mask tables.
+  - Pass it into compiled data through `Builder.AddNode(Node, Settings)`.
+- **Runtime state (instance state)**: store it as node instance members.
+  - Examples: target location, enabled state, timestamps, dynamic weights.
+  - Modify it through Blueprint/script APIs, and call `NodeRef.MarkDirty()` when needed.
 
-规则：
+Rules:
 
-- 不要把编译期不变的配置放到每帧上传参数里。
-- 运行时上传结构体必须与 shader 对应结构严格同布局，建议 `static_assert(sizeof(...))`。
+- Do not put compile-time-stable configuration into per-frame upload parameters.
+- Runtime upload structs must match the corresponding shader layout exactly; `static_assert(sizeof(...))` is recommended.
 
 ---
 
-## 4. 必备接口（按需）
+## 4. Node Execution Interfaces
 
-节点由 `TGIAG_AnimNodeMeta<T>` 自动适配，常见实现点：
+Nodes are adapted automatically by `TGIAG_AnimNodeMeta<T>`. Common implementation points are:
 
-- `GatherUploadsGPU(uint32& OutUploadStrideBytes) const`
 - `static void AddPassesGPU(const FGIAG_AnimNodeDispatchContext& Context)`
 - `static void AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& Context)`
+- `GatherUploadsGPU(uint32& OutUploadStrideBytes) const` (return `nullptr` when there are no GPU upload parameters)
 
-可选实现：
+Optional implementation points:
 
 - `EnumerateResourceRequests(...)`
 - `BuildResourceForGPU(...)`
 - `BuildResourceForCPU(...)`
-- `ComputeCullNeedMaskCPU(...)` + `EmitCullNeedMaskHlslBody(...)`（二者必须同时实现或同时不实现）
+- `ComputeCullNeedMaskCPU(...)` + `EmitCullNeedMaskHlslBody(...)` (they must both exist or both be omitted)
 
 ---
 
-## 5. CPU 路径规范
+## 5. CPU Path Rules
 
-- 以 `Context.NodeIndices` 为批次遍历入口。
-- 输入输出视图必须先做契约检查（`check`）。
-- 对 1 输入 1 输出节点，通常先做 Base->Out passthrough，再覆盖目标骨/目标数据。
-- 使用现有公共数学语义（与 shader 保持一致），避免 CPU/GPU 分叉算法。
+- Iterate batches through `Context.NodeIndices`.
+- Check input/output views first (`check`).
+- For one-input, one-output nodes, a common pattern is to copy Base -> Out first, then overwrite target bones or target data.
+- Use shared math semantics that match the shader; avoid divergent CPU/GPU algorithms.
 
-空间相关补充：
+Space-related notes:
 
-- `FGIAG_CPUPoseBufferView` 带 `PoseType`，建议在入口做 `checkf(InPose.PoseType == 期望类型, ...)`
-- 不要在节点里手动做 Local<->Component 转换来“兼容”错误连线
-- 如节点天然改变空间（少见），应通过 pin 类型表达，让编译器插入/复用转换
+- `FGIAG_CPUPoseBufferView` carries `PoseType`; check expected types at entry, for example `checkf(InPose.PoseType == ExpectedType, ...)`.
+- Do not manually convert Local <-> Component inside a node to "support" invalid links.
+- If a node naturally changes pose space, express that through pin types so the compiler can insert or reuse conversions.
 
 ---
 
-## 6. GPU 路径规范
+## 6. GPU Path Rules
 
-- shader 放在 `Shaders/Nodes/`，通过模块映射 `/GameInstancedAnimationGraphNode/...` 引用。
-- 每个批次节点按 `Context.NodeIndices` 逐个发 pass。
-- 参数尽量走现有上下文资源：
+- Put shaders under `Shaders/Nodes/`, referenced through the `/GameInstancedAnimationGraphNode/...` module mapping.
+- For each node batch, issue passes by iterating `Context.NodeIndices`.
+- Prefer existing context resources:
   - `NodeParamSRVsPerNode`
   - `InputPosesPerNode/OutputPosesPerNode`
   - `WorldToComponentBySlotSRV`
   - `ActiveInstanceIndicesSRV`
   - `NeedNodeBitsSRV`
-- 节点 cull 位图语义要兼容 `GIAG_IsNodeNeeded(...)`。
+- Node cull bit semantics must remain compatible with `GIAG_IsNodeNeeded(...)`.
 
-空间相关补充：
+Space-related notes:
 
-- shader 输入输出缓冲区按 pin 空间契约使用，不再引入 `InputPoseType` 之类运行时分支
-- 若需要 `ComponentPose`，直接把 pin 声明为 `ComponentPose`
-- 与 CPU 路径保持同构，避免 CPU/GPU 因空间处理差异造成一致性偏差
-
----
-
-## 7. Optional Resource 规范
-
-用于“静态且可共享”的资源（例如骨索引、每骨权重）：
-
-- 在 `EnumerateResourceRequests` 声明 `Slot + ShareKey + Layout + Access`
-- `BuildResourceForGPU/CPU` 构建对应资源
-- `ShareKey` 必须包含会影响内容布局/值的所有因素
-- GPU/CPU 资源都应可由同一语义配置推导，避免分叉
+- Shader input/output buffers follow the pin-space contract; do not introduce runtime branches such as `InputPoseType`.
+- If the node needs `ComponentPose`, declare the pin as `ComponentPose`.
+- Keep GPU behavior isomorphic to the CPU path to avoid consistency drift from space handling differences.
 
 ---
 
-## 8. 节点 API 规范（Blueprint/脚本）
+## 7. Optional Resource Rules
 
-- 通过 `UBlueprintFunctionLibrary` 暴露运行时修改函数。
-- 仅在值真正变化时才 `MarkDirty()`，避免无意义上传。
-- 对“开关+过渡”类逻辑，推荐运行时只暴露 `SetEnabled`，Alpha 在节点内按时间计算。
+Optional resources are for **static and shareable** data, such as bone indices or per-bone weights:
 
----
-
-## 9. Cull 逻辑契约
-
-如果节点支持输入裁剪：
-
-- CPU：`ComputeCullNeedMaskCPU(uint32 NumInputs)` 返回 bitmask
-- HLSL：`EmitCullNeedMaskHlslBody(...)` 输出等价逻辑
-- 两边必须语义一致，且必须同时存在
-
-不支持 cull 的节点不实现上述接口。
+- Declare `Slot + ShareKey + Layout + Access` in `EnumerateResourceRequests`.
+- Build the corresponding resources in `BuildResourceForGPU/CPU`.
+- `ShareKey` must include every factor that affects content layout or values.
+- GPU and CPU resources should be derived from the same semantic configuration to avoid divergent behavior.
 
 ---
 
-## 10. 验证清单
+## 8. Node API Rules (Blueprint / Script)
 
-新增节点后至少完成：
-
-- 工程编译通过（Editor DebugGame）
-- Shader 编译通过
-- 示例图可挂载并运行
-- CPU/GPU 关键语义一致（必要时补自动化测试）
+- Expose runtime modification functions through `UBlueprintFunctionLibrary`.
+- Call `MarkDirty()` only when the value actually changes, avoiding meaningless uploads.
+- For "enabled + transition" logic, prefer exposing only `SetEnabled` at runtime and let the node compute Alpha by time internally.
 
 ---
 
-## 11. 推荐最小实现顺序
+## 9. Cull Logic Contract
 
-1. 定义 `FSettings` + 节点实例结构 + API  
-2. 打通 `GatherUploadsGPU`  
-3. 打通 `AddPassesCPU`  
-4. 打通 `AddPassesGPU + .usf`  
-5. 接入 optional resource（若需要）  
-6. 接入示例图并验证编译/运行
+If a node supports input culling:
+
+- CPU: `ComputeCullNeedMaskCPU(uint32 NumInputs)` returns a bitmask.
+- HLSL: `EmitCullNeedMaskHlslBody(...)` emits equivalent logic.
+- Both sides must have the same semantics, and both must exist together.
+
+Nodes that do not support culling do not implement those interfaces.
 
 ---
 
-## 12. ISPC 与 HLSL 同构实现（必读）
+## 10. Validation Checklist
 
-### 12.1 共享实现架构
+After adding a node, at least verify:
 
-本项目的数学同构不是“复制两份代码”，而是：
+- The project compiles (Editor DebugGame).
+- Shaders compile.
+- The node can be mounted and run in an example graph.
+- Key CPU/GPU semantics match; add automation tests when needed.
 
-- 单一实现源：`Shaders/Common/Shared/GIAG_MathShared.ush`
-- HLSL 包装：`Shaders/Common/GIAG_Math.ush`
-- ISPC 包装：`Source/GameInstancedAnimationGraph/Public/GIAG_Math.isph`
+---
 
-约定：
+## 11. ISPC and HLSL Isomorphic Implementation
 
-- 包装层必须先定义类型和宏，再 include 共享文件
-- 共享文件里只写语言无关实现（通过宏适配）
+### 11.1 Shared Implementation Architecture
 
-### 12.2 新增 ISPC 节点内核规则
+The project does not duplicate math logic in two separate implementations. Instead, it uses:
 
-- 文件位置：`Source/GameInstancedAnimationGraphNode/Private/GIAG_XXXNode.ispc`
-- 必须 `#include "GIAG_AnimCommon.isph"`
-- 导出函数必须用 `export`，并且参数使用裸数组/POD
-- 节点 AoS 结构体（`FGIAG_XXXNode_ISPC`）必须显式对齐/补齐，和 C++ 实例布局一致
+- Single implementation source: `Shaders/Common/Shared/GIAG_MathShared.ush`
+- HLSL wrapper: `Shaders/Common/GIAG_Math.ush`
+- ISPC wrapper: `Source/GameInstancedAnimationGraph/Public/GIAG_Math.isph`
 
-### 12.3 C++ 侧绑定规则
+Conventions:
 
-- 在节点 `.cpp` 引入：
+- Wrappers define types and macros first, then include the shared file.
+- The shared file contains language-neutral implementation, adapted through macros.
+
+### 11.2 Adding an ISPC Node Kernel
+
+- File location: `Source/GameInstancedAnimationGraphNode/Private/GIAG_XXXNode.ispc`
+- Must include `#include "GIAG_AnimCommon.isph"`
+- Exported functions must use `export`, and parameters should be raw arrays/POD.
+- The node AoS struct (`FGIAG_XXXNode_ISPC`) must be explicitly aligned/padded to match the C++ instance layout.
+- Node instance data is passed as slot-indexed AoS; the index chain is `ActiveIndex -> SlotIndex -> BoneIndex -> LinearIndex`.
+
+Minimal skeleton:
+
+```cpp
+#include "GIAG_AnimCommon.isph"
+
+struct FGIAG_XXXNode_ISPC
+{
+	float Alpha;
+	unsigned int32 _pad0;
+	unsigned int32 _pad1;
+	unsigned int32 _pad2;
+};
+
+export void GIAG_XXXKernel(
+	uniform int NumBones,
+	uniform int NumInstances,
+	uniform int SlotCapacity,
+	const uniform unsigned int32 ActiveInstanceIndices[],
+	const uniform FGIAG_XXXNode_ISPC NodesBySlot[],
+	const uniform FGIAG_BoneTRS InPose[],
+	uniform FGIAG_BoneTRS OutPose[])
+{
+	const uniform int Total = NumBones * NumInstances;
+	foreach (DispatchId = 0 ... Total)
+	{
+		int ActiveIndex = DispatchId / NumBones;
+		int BoneIndex = DispatchId - ActiveIndex * NumBones;
+		int SlotIndex = (int)ActiveInstanceIndices[ActiveIndex];
+		if (SlotIndex < 0 || SlotIndex >= SlotCapacity)
+		{
+			continue;
+		}
+
+		int Index = SlotIndex * NumBones + BoneIndex;
+		OutPose[Index] = InPose[Index];
+	}
+}
+```
+
+### 11.3 C++ Binding Rules
+
+- Include the generated header in the node `.cpp`:
   - `#include "GIAG_XXXNode.ispc.generated.h"`
-- 必须做布局校验：
+- Validate layouts:
   - `static_assert(sizeof(ispc::FGIAG_BoneTRS) == sizeof(FGIAG_BoneTRS), ...)`
   - `static_assert(sizeof(ispc::FGIAG_XXXNode_ISPC) == sizeof(FGIAG_XXXNode), ...)`
-- `AddPassesCPU` 中传入 `Context.NodeData[NodeIdx]` 时，按 slot-indexed AoS 解释，禁止自行重排
+- When passing `Context.NodeData[NodeIdx]` in `AddPassesCPU`, interpret it as slot-indexed AoS. Do not reorder it yourself.
 
-### 12.4 HLSL/ISPC 同构校验清单
+Example call:
 
-- 输入/输出索引公式一致：
+```cpp
+#include "GIAG_XXXNode.ispc.generated.h"
+static_assert(sizeof(ispc::FGIAG_BoneTRS) == sizeof(FGIAG_BoneTRS), "GIAG ISPC: FGIAG_BoneTRS layout mismatch.");
+static_assert(sizeof(ispc::FGIAG_XXXNode_ISPC) == sizeof(FGIAG_XXXNode), "GIAG ISPC: FGIAG_XXXNode layout mismatch.");
+
+void FGIAG_XXXNode::AddPassesCPU(const FGIAG_AnimNodeCpuDispatchContext& Context)
+{
+	for (int32 NodeIndexInBatch = 0; NodeIndexInBatch < Context.NodeIndices.Num(); ++NodeIndexInBatch)
+	{
+		const int32 NodeIdx = Context.NodeIndices[NodeIndexInBatch];
+		const FGIAG_CPUPoseBufferView InPose = Context.InputPosesPerNode[NodeIndexInBatch][(uint8)EInputPin::Base];
+		const FGIAG_CPUPoseBufferView OutPose = Context.OutputPosesPerNode[NodeIndexInBatch][(uint8)EOutputPin::Out];
+		check(InPose.IsValid() && OutPose.IsValid());
+
+		ispc::GIAG_XXXKernel(
+			Context.NumBones,
+			Context.NumInstances,
+			Context.SlotCapacity,
+			(const uint32*)Context.ActiveInstanceIndices.GetData(),
+			(const ispc::FGIAG_XXXNode_ISPC*)Context.NodeData[NodeIdx],
+			(const ispc::FGIAG_BoneTRS*)InPose.Data,
+			(ispc::FGIAG_BoneTRS*)OutPose.Data);
+	}
+}
+```
+
+### 11.4 HLSL/ISPC Isomorphism Checklist
+
+- Input/output indexing formula is the same:
   - `ActiveIndex -> SlotIndex -> BoneIndex -> LinearIndex`
-- 分支一致：
-  - 例如 `alpha<=0`、`alpha>=1`、null 权重、early return 条件
-- 数值语义一致：
-  - quat 归一化、符号对齐、nlerp/slerp 选择、clamp 规则
-- 边界一致：
-  - `SlotIndex` 范围检查、`NumBones*NumInstances` 总迭代范围
+- Branches are the same:
+  - For example `alpha<=0`, `alpha>=1`, null weights, early return conditions.
+- Numeric semantics are the same:
+  - Quaternion normalization, sign alignment, nlerp/slerp choice, clamp rules.
+- Boundaries are the same:
+  - `SlotIndex` range checks and `NumBones*NumInstances` total iteration range.
 
-### 12.5 常见坑
+### 11.5 Common Pitfalls
 
-- `.ispc` 结构体少了 padding，导致读取错位
-- HLSL 改了公式，ISPC 未同步
-- 没有 `static_assert`，布局问题到运行时才暴露
-- 在 ISPC 里使用不适合 SIMD 的复杂对象/容器
+- Missing padding in `.ispc` structs, causing misaligned reads.
+- Updating a formula in HLSL without updating ISPC.
+- Missing `static_assert`, so layout issues only show up at runtime.
+- Using complex objects or containers inside ISPC that are unsuitable for SIMD.
 
-### 12.6 模块配置说明
+### 11.6 Module Configuration Note
 
-`GameInstancedAnimationGraphNode.Build.cs` 已包含：
+`GameInstancedAnimationGraphNode.Build.cs` already contains:
 
 - `PrivateIncludePaths.Add(.../Shaders/Common/Shared)`
 
-用于让 ISPC 预处理器可见共享实现文件。新增节点一般不需要额外改 Build.cs。
+This lets the ISPC preprocessor see the shared implementation files. New nodes usually do not need additional `Build.cs` changes.

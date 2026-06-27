@@ -55,14 +55,30 @@ FGIAG_AnimGraphUploads FGIAG_AnimGraphUploadBuilder::BuildUploads_GameThread(
 			continue;
 		}
 
+		TBitArray<>& Bits = InOutNodeParamDirtyBitsByNode[NodeIdx];
+		int32 FirstValidDirtySlot = INDEX_NONE;
+		for (int32 DirtyIdx = DirtySlots.Num() - 1; DirtyIdx >= 0; --DirtyIdx)
+		{
+			const int32 SlotIndex = (int32)DirtySlots[DirtyIdx];
+			if (SlotIndex < 0 || SlotIndex >= SlotCapacity || !Bits.IsValidIndex(SlotIndex) || !Bits[SlotIndex])
+			{
+				DirtySlots.RemoveAtSwap(DirtyIdx, 1, EAllowShrinking::No);
+				continue;
+			}
+			FirstValidDirtySlot = SlotIndex;
+		}
+		if (DirtySlots.Num() == 0)
+		{
+			continue;
+		}
+
 		// Determine stride lazily from a constructed instance.
 		uint32& StrideBytes = NodeParamStrideBytesByNode[NodeIdx];
 		if (StrideBytes == 0)
 		{
 			uint32 Stride = 0;
-			const int32 FirstDirtySlot = (int32)DirtySlots[0];
-			check(FirstDirtySlot >= 0 && FirstDirtySlot < SlotCapacity);
-			void* NodeDataPtr = NodeData[NodeIdx] + (int64)NodeStrideBytes[NodeIdx] * (int64)FirstDirtySlot;
+			check(FirstValidDirtySlot != INDEX_NONE);
+			void* NodeDataPtr = NodeData[NodeIdx] + (int64)NodeStrideBytes[NodeIdx] * (int64)FirstValidDirtySlot;
 			Node.NodeMeta->GatherUploadsGPU(NodeDataPtr, Stride);
 			StrideBytes = FMath::Max<uint32>(Stride, 1u);
 		}
@@ -82,7 +98,6 @@ FGIAG_AnimGraphUploads FGIAG_AnimGraphUploadBuilder::BuildUploads_GameThread(
 			checkf(SlotIndex >= 0 && SlotIndex < SlotCapacity, TEXT("GIAG: invalid dirty slot %d (Cap=%d)."), SlotIndex, SlotCapacity);
 
 			// Clear dirty bit as we consume (event-driven).
-			TBitArray<>& Bits = InOutNodeParamDirtyBitsByNode[NodeIdx];
 			check(Bits.IsValidIndex(SlotIndex));
 			Bits[SlotIndex] = false;
 
